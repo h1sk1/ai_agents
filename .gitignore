@@ -1,0 +1,63 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Compressed files
+*.zip
+
+# Local configuration files
+Makefile*
+
+# Test data
+*_test.json
+
+# IDE
+.idea/
+
+# Mac
+.DS_Store
+
+# VS Code
+.vscode
+
+# Logs
+logs/
+Backend/logs
+
+# Files
+files/
+
+# Environment variables
+*.env
+
+# Logs
+*.log
+
+# Dependency directories (remove the comment below to include it)
+# Using go vendor to manage go dependency, avoid getting go package everytime
+# vendor
+db
+*rdb
+
+# Website files
+static/
+
+# Python
+.venv/
+
+# Project
+data/
+
+tmp/
+working/
+
+__pycache__/
