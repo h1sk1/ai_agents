@@ -8,7 +8,6 @@ from langgraph.types import Command
 from langgraph.graph import StateGraph
 
 import matplotlib.pyplot as plt
-import numpy as np
 
 # Define the board size (default 15x15 for Gomoku)
 BOARD_SIZE = 15
@@ -40,21 +39,12 @@ class GomokuBoard:
             self.ax.plot(point[1], point[0], 'o', color="black", markersize=5)
 
     def _initialize_board(self):
-        """
-        Draw the initial Gomoku board.
-        """
+        # Draw the initial Gomoku board.
         self._draw_board()
 
         plt.show()
 
     def _update_board(self):
-        """
-        Update the board with moves.
-        :param board: A 2D numpy array representing the board state.
-                      0 = empty, 1 = black stone, 2 = white stone
-        :param moves: A list of moves, where each move is a tuple (x, y, player)
-                      player = 1 for black, 2 for white
-        """
         # Draw the updated board
         self._draw_board()
 
@@ -102,6 +92,7 @@ class GomokuBoard:
                 else:
                     break
             if count >= 5:
+                print("-----------------Game Over-----------------")
                 print(f"Player {player} wins!")
                 return player
         return None
@@ -260,6 +251,6 @@ events = graph.stream(
 
 # Display game events
 for event in events:
-    print("---------Current Agent---------")
+    print("-----------------Agent Completed-----------------")
     for key in event.keys():
         print(key)
