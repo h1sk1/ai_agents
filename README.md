@@ -1,6 +1,8 @@
 # Gomoku AI Agent
 This project is a Gomoku AI agent, decide which move to make based on the current board state by LLM itself.
 
+[Workflows](docs/workflow.md)
+
 ## Dependencies
 - Python 3.12
 ```bash
