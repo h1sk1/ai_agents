@@ -46,7 +46,7 @@ def decompose_tasks(user_input: str) -> List[dict]:
     Return the result as a JSON array.
     Input: {input}
     """)
-    chain = prompt | deepseek_llm
+    chain = prompt | deepseek_reasoner_llm
     response = chain.invoke({"input": user_input}).content
     # Clean up the response
     # Find first occurrence of [ and remove everything before it
