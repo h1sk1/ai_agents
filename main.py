@@ -1,7 +1,9 @@
 # Import required libraries
+import os
 from typing import Literal, Annotated
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_openai import ChatOpenAI
+from langchain_deepseek import ChatDeepSeek
 from langgraph.prebuilt import create_react_agent
 from langgraph.graph import MessagesState, END, START
 from langgraph.types import Command
@@ -135,9 +137,25 @@ llm = ChatOpenAI(model="gpt-4o")
 
 mini_llm = ChatOpenAI(model="gpt-4o-mini")
 
+# LM Studio Local LLM
+# llm = ChatOpenAI(
+#     base_url="http://localhost:1234/v1",
+#     api_key="something",
+#     temperature=0.5,
+#     streaming=False,
+# )
+
+deepseek_llm = ChatDeepSeek(
+    model_name=os.environ.get("DEEPSEEK_V3_MODEL", "deepseek-chat"),
+    api_base=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+    api_key=os.environ.get("DEEPSEEK_API_KEY", "your-api-key"),
+    temperature=0,
+)
+
+
 # Define agents
 black_agent = create_react_agent(
-    llm,
+    deepseek_llm,
     tools=[],
     state_modifier="""
     You are a professional, aggressive Gomoku player, you play as the Black Player in a Gomoku game. Your marker is 'B'. 
@@ -162,7 +180,7 @@ black_agent = create_react_agent(
 )
 
 white_agent = create_react_agent(
-    llm,
+    deepseek_llm,
     tools=[],
     state_modifier="""
     You are a professional, defensive Gomoku player, you play as the White Player in current Gomoku game. Your marker is 'W'.
