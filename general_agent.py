@@ -200,5 +200,5 @@ initial_state = {
 
 result = agent.invoke(initial_state)
 # Write the final report to a file
-with open("./report.md", "w") as f:
+with open("results/report.md", "w") as f:
     f.write(result["report"])

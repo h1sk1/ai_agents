@@ -57,7 +57,9 @@ static/
 # Project
 data/
 
-tmp/
+results/
 working/
 
 __pycache__/
+
+results/
