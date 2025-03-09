@@ -7,7 +7,7 @@ from langchain.agents import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
-from langchain_community.tools import DuckDuckGoSearchResults
+from langchain_community.tools import DuckDuckGoSearchResults, TavilySearchResults
 from langchain_community.document_loaders import PlaywrightURLLoader
 
 # Initialize models
@@ -84,14 +84,26 @@ def route_task(task: dict) -> str:
 
     return response
 
-def web_search(task: dict) -> List[str]:
+async def web_search(task: dict) -> (List[str], str):
     print(f"Searching the web for: {task['description']}")
-    duckduckgo_results = DuckDuckGoSearchResults().invoke(task["description"])
+    async def search_duckduckgo(query: str):
+        return await DuckDuckGoSearchResults().ainvoke(query)
+
+    async def search_tavily(query: str):
+        return await TavilySearchResults().ainvoke(query)
+
+    # Run both search tasks concurrently
+    duckduckgo_results, tavily_results = await asyncio.gather(search_duckduckgo(task["description"]), search_tavily(task["description"]))
     # Get all links from the duckduckgo_results string, start with 'link: ', end with ',' or at the end of the string
     duckduckgo_results_links = [link.split(",")[0] for link in duckduckgo_results.split("link: ")[1:]]
-    print(f"Web search results: {duckduckgo_results}")
-    print(f"links: {duckduckgo_results_links}")
-    return duckduckgo_results_links
+
+    tavily_contents = ""
+    if tavily_results:
+        for result in tavily_results:
+            tavily_contents += result["content"] + "\n"
+    print(f"Tavily search results: {tavily_contents}")
+    print(f"Duckduckgo links: {duckduckgo_results_links}")
+    return duckduckgo_results_links, tavily_contents
 
 
 async def parse_search_links(search_links: List[str], task_description: str) -> str:
@@ -153,17 +165,17 @@ def router_node(state: AgentState) -> dict:
     needs_tool = route_task(state["current_task"])
     return {"needs_tool": needs_tool}
 
-def search_agent_node(state: AgentState) -> dict:
+async def search_agent_node(state: AgentState) -> dict:
     if not state["current_task"]:
         return {}
-    search_links = web_search(state["current_task"])
-    return {"search_links": search_links}
+    search_links, tavily_content = await web_search(state["current_task"])
+    return {"search_links": search_links, "task_result": tavily_content}
 
 async def search_result_parser_node(state: AgentState) -> dict:
     if not state["search_links"] or not state["current_task"]:
         return {}
     search_result = await parse_search_links(state["search_links"], state["current_task"]["description"])
-    return {"task_result": search_result}
+    return {"task_result": state["task_result"] + search_result}
 
 def task_executor_node(state: AgentState) -> dict:
     if not state["current_task"]:
@@ -245,13 +257,13 @@ async def run_agent(your_task: str = None):
     }
     return await agent.ainvoke(initial_state)
 
-your_task = "Search for the latest research articles on ‘quantum computing applications in cryptography’ published in 2025. Summarize the key findings of the top three articles."
+your_task = "Investigate the latest developments in cryptocurrency adoption by major financial institutions. Identify which banks or investment firms have recently integrated cryptocurrency services or products, and analyze how these integrations have impacted the overall market."
 
 result = asyncio.run(run_agent(your_task))
 
+file_path = os.path.join("results", "report.md")
 # Write the final report to a file
-with open("results/report.md", "w") as f:
-    print("Writing report to file...")
+with open(file_path, "w") as f:
     f.write(result["report"])
 
-print("Report generated successfully!")
+print(f"Report {file_path} generated successfully!")
