@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from typing import TypedDict, List, Optional, Dict
@@ -6,9 +7,8 @@ from langchain.agents import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain_core.runnables import RunnablePassthrough
-from pydantic import BaseModel
+from langchain_community.tools import DuckDuckGoSearchResults
+from langchain_community.document_loaders import PlaywrightURLLoader
 
 # Initialize models
 deepseek_llm = ChatDeepSeek(
@@ -35,6 +35,7 @@ class AgentState(TypedDict):
     current_task: Optional[dict]
     needs_tool: Optional[str]  # "True" or "False"
     task_result: Optional[str]  # Temporary result of current task
+    search_links: Optional[List[str]]  # Search links
     report: Optional[str]      # Final report
 
 def decompose_tasks(user_input: str) -> List[dict]:
@@ -83,10 +84,45 @@ def route_task(task: dict) -> str:
 
     return response
 
-def web_search(task: dict) -> str:
-    from langchain_community.tools import DuckDuckGoSearchResults
+def web_search(task: dict) -> List[str]:
     print(f"Searching the web for: {task['description']}")
-    return DuckDuckGoSearchResults().invoke(task["description"])
+    duckduckgo_results = DuckDuckGoSearchResults().invoke(task["description"])
+    # Get all links from the duckduckgo_results string, start with 'link: ', end with ',' or at the end of the string
+    duckduckgo_results_links = [link.split(",")[0] for link in duckduckgo_results.split("link: ")[1:]]
+    print(f"Web search results: {duckduckgo_results}")
+    print(f"links: {duckduckgo_results_links}")
+    return duckduckgo_results_links
+
+
+async def parse_search_links(search_links: List[str], task_description: str) -> str:
+    prompt = PromptTemplate.from_template("""
+    Extract the main content from documents found in the search results.
+    
+    Current task: {task}
+    
+    Search html result parsed document by Playwright: {document}
+    """
+    )
+    loader = PlaywrightURLLoader(urls=search_links, remove_selectors=["header", "footer"])
+    data = await loader.aload()
+    chain = prompt | deepseek_llm
+
+    search_results = []
+
+    async_tasks = []
+    for document in data:
+        async def parse_document(document: str):
+            response = await chain.ainvoke({"document": document, "task": task_description})
+            result = response.content
+            search_results.append(result)
+
+        async_tasks.append(parse_document(document))
+
+    await asyncio.gather(*async_tasks)
+
+    search_result = "\n".join(search_results)
+    print(f"Search result: {search_result}")
+    return search_result
 
 def execute_task(task: dict, task_results: Dict[str, str]) -> str:
     prompt = PromptTemplate.from_template("""
@@ -120,8 +156,14 @@ def router_node(state: AgentState) -> dict:
 def search_agent_node(state: AgentState) -> dict:
     if not state["current_task"]:
         return {}
-    result = web_search(state["current_task"])
-    return {"task_result": result}
+    search_links = web_search(state["current_task"])
+    return {"search_links": search_links}
+
+async def search_result_parser_node(state: AgentState) -> dict:
+    if not state["search_links"] or not state["current_task"]:
+        return {}
+    search_result = await parse_search_links(state["search_links"], state["current_task"]["description"])
+    return {"task_result": search_result}
 
 def task_executor_node(state: AgentState) -> dict:
     if not state["current_task"]:
@@ -149,7 +191,8 @@ def state_updater_node(state: AgentState) -> dict:
         "task_results": new_results,
         "tasks": remaining_tasks,
         "current_task": next_task,
-        "task_result": None  # Clear temporary result
+        "task_result": None,  # Clear temporary result
+        "search_links": None  # Clear search links
     }
 
 def report_generator_node(state: AgentState) -> dict:
@@ -164,6 +207,7 @@ workflow = StateGraph(AgentState)
 workflow.add_node("decomposer", decomposer_node)
 workflow.add_node("router", router_node)
 workflow.add_node("search_agent", search_agent_node)
+workflow.add_node("search_result_parser", search_result_parser_node)
 workflow.add_node("task_executor", task_executor_node)
 workflow.add_node("state_updater", state_updater_node)
 workflow.add_node("report_generator", report_generator_node)
@@ -176,7 +220,8 @@ workflow.add_conditional_edges(
     lambda state: "search_agent" if state["needs_tool"] == "True" else "task_executor",
     {"search_agent": "search_agent", "task_executor": "task_executor"}
 )
-workflow.add_edge("search_agent", "state_updater")
+workflow.add_edge("search_agent", "search_result_parser")
+workflow.add_edge("search_result_parser", "state_updater")
 workflow.add_edge("task_executor", "state_updater")
 workflow.add_conditional_edges(
     "state_updater",
@@ -188,17 +233,25 @@ workflow.add_edge("report_generator", END)
 # Compile the agent
 agent = workflow.compile()
 
-initial_state = {
-    "user_input": "Compare AI progress between Google and OpenAI in 2025",
-    "tasks": [],
-    "task_results": {},
-    "current_task": None,
-    "needs_tool": None,
-    "task_result": None,
-    "report": None
-}
+async def run_agent(your_task: str = None):
+    initial_state = {
+        "user_input": your_task,
+        "tasks": [],
+        "task_results": {},
+        "current_task": None,
+        "needs_tool": None,
+        "task_result": None,
+        "report": None
+    }
+    return await agent.ainvoke(initial_state)
 
-result = agent.invoke(initial_state)
+your_task = "Search for the latest research articles on ‘quantum computing applications in cryptography’ published in 2025. Summarize the key findings of the top three articles."
+
+result = asyncio.run(run_agent(your_task))
+
 # Write the final report to a file
 with open("results/report.md", "w") as f:
+    print("Writing report to file...")
     f.write(result["report"])
+
+print("Report generated successfully!")
