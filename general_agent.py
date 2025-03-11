@@ -133,9 +133,9 @@ async def route_task(task: dict) -> str:
     if need_tool not in ["True", "False"]:
         raise ValueError(f"Invalid response: {response}")
 
-    needs_external_tool = "[ ]"
+    needs_external_tool = "[x]"
     if response == "True":
-        needs_external_tool = "[X]"
+        needs_external_tool = "[✔]"
     print(f"Task: {task['name']} needs external tools {needs_external_tool}")
 
     return response
@@ -386,7 +386,7 @@ def state_updater_node(state: AgentState) -> dict:
     print("\n")
     print("Current task status:")
     for task in state["all_tasks"]:
-        completed = "[ ]" if task in remaining_tasks else "[X]"
+        completed = "[ ]" if task in remaining_tasks else "[✔]"
         print(f"Task: {task['name']}, Completed: {completed}")
     print("\n")
 
@@ -453,11 +453,18 @@ async def run_agent(your_task: str = None):
     }
     return await agent.ainvoke(initial_state, config={"recursion_limit": 100})
 
-your_task = "I am a beginner photographer. Find me some cameras, which lenses systems has decent optical performance, and good for landscape photography. Budget is below $600. And the weight of the camera should be less than 3 pounds. The camera cannot be older than 2018. It can be M43, APS-C, Full frame, also Point&Shoot."
+your_task = """
+I'm currently working on a project to build a evm compatible side-chain for VSYS chain.
+Find and compare side-chain and bridging solutions for VSYS chain.
+The side-chain needs to be compatible with EVM and support smart contracts
+The side-chain can be used for commercial
+The side-chain needs to run as a private chain, cannot connect to current main/test blockchain network.
+The bridging solution should be secure and efficient. VSYS chain do not have any side-chain or bridging solution yet, so current bridging solutions will not work, we have to start from scratch.
+"""
 
 result = asyncio.run(run_agent(your_task))
 
-file_name = "cameras.md"
+file_name = "vsys-side-chain.md"
 file_path = os.path.join("results", file_name)
 # Write the final report to a file
 with open(file_path, "w") as f:
