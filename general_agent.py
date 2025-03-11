@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import random
 import time
 import traceback
 from typing import TypedDict, List, Optional, Dict
@@ -185,7 +186,9 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
 
     for query in queries:
         async def gather_search_results(query: str):
-            await asyncio.sleep(10)
+            random.seed(time.time())
+            random_num = random.randint(10, 20)
+            await asyncio.sleep(random_num)
             for i in range(3):
                 try:
                     # Run both search tasks concurrently
@@ -327,7 +330,7 @@ async def execute_task(task: dict, task_results: Dict[str, str]) -> str:
     print(f"Executing task: {task}, with current knowledge: {task_results}")
     for i in range(3):
         if i == 2:
-            current_chain = prompt | volcengine_deepseek_llm
+            current_chain = prompt | deepseek_reasoner_llm
         else:
             current_chain = chain
         try:
@@ -456,10 +459,15 @@ async def run_agent(your_task: str = None):
 your_task = """
 I'm currently working on a project to build a evm compatible side-chain for VSYS chain.
 Find and compare side-chain and bridging solutions for VSYS chain.
-The side-chain needs to be compatible with EVM and support smart contracts
-The side-chain can be used for commercial
+The side-chain needs to be compatible with EVM and support smart contracts.
+The side-chain can be used for commercial.
 The side-chain needs to run as a private chain, cannot connect to current main/test blockchain network.
-The bridging solution should be secure and efficient. VSYS chain do not have any side-chain or bridging solution yet, so current bridging solutions will not work, we have to start from scratch.
+The bridging solution should be secure and efficient.
+VSYS chain do not have any side-chain or bridging solution yet, so current bridging solutions will not work, we have to start from scratch.
+You need to study how VSYS chain works, including consensus, block generation, transaction processing, etc. from online resources and your own research. 
+You need to study how side-chain works, including consensus, block generation, transaction processing, etc. from online resources and your own research.
+You need to study how bridging solution works, including cross-chain communication, asset transfer, etc. from online resources and your own research.
+My final goal is tweaking VSYS chain and creating a bridge to a currently existing evm compatible blockchain as a side-chain.
 """
 
 result = asyncio.run(run_agent(your_task))
