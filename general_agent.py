@@ -1,31 +1,60 @@
 import asyncio
 import json
 import os
+import time
+import traceback
 from typing import TypedDict, List, Optional, Dict
 from langgraph.graph import StateGraph, END
 from langchain.agents import tool
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
-from langchain_community.tools import DuckDuckGoSearchResults, TavilySearchResults
+from langchain_community.utilities import SearxSearchWrapper
+from langchain_community.tools import DuckDuckGoSearchResults, TavilySearchResults, SearxSearchResults
 from langchain_community.document_loaders import PlaywrightURLLoader
 
 # Initialize models
+# deepseek_llm = ChatDeepSeek(
+#     model_name=os.environ.get("DEEPSEEK_V3_MODEL", "deepseek-chat"),
+#     api_base=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+#     api_key=os.environ.get("DEEPSEEK_API_KEY", "your-api-key"),
+#     temperature=0,
+# )
+
 deepseek_llm = ChatDeepSeek(
-    model_name=os.environ.get("DEEPSEEK_V3_MODEL", "deepseek-chat"),
-    api_base=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
-    api_key=os.environ.get("DEEPSEEK_API_KEY", "your-api-key"),
+    model_name=os.environ.get("VOL_DEEPSEEK_V3_MODEL", "deepseek-chat"),
+    api_base=os.environ.get("VOL_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+    api_key=os.environ.get("VOL_DEEPSEEK_API_KEY", "your-api-key"),
     temperature=0,
 )
+
+# deepseek_reasoner_llm = ChatDeepSeek(
+#     model_name=os.environ.get("DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"),
+#     api_base=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+#     api_key=os.environ.get("DEEPSEEK_API_KEY", "your-api-key"),
+#     temperature=0,
+# )
 
 deepseek_reasoner_llm = ChatDeepSeek(
-    model_name=os.environ.get("DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"),
-    api_base=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
-    api_key=os.environ.get("DEEPSEEK_API_KEY", "your-api-key"),
+    model_name=os.environ.get("VOL_DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"),
+    api_base=os.environ.get("VOL_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+    api_key=os.environ.get("VOL_DEEPSEEK_API_KEY", "your-api-key"),
     temperature=0,
 )
 
+volcengine_deepseek_llm = ChatOpenAI(
+    model_name=os.environ.get("VOL_DEEPSEEK_V3_MODEL", "deepseek-chat"),
+    openai_api_base=os.environ.get("VOL_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+    openai_api_key=os.environ.get("VOL_DEEPSEEK_API_KEY", "your-api-key"),
+    temperature=0,
+)
 
+searchXNG = SearxSearchWrapper(
+    searx_host=os.environ.get("SEARXNG_BASE_URL", "http://localhost:8080"),
+)
+
+# result = searchXNG.results("test", num_results=5, engines=["bing", "duckduckgo", "google", "yahoo", "wikipedia", "wikidata"])
+# print(result)
 
 class AgentState(TypedDict):
     user_input: str
@@ -62,7 +91,7 @@ def decompose_tasks(user_input: str) -> List[dict]:
     print("\n")
     return tasks
 
-def route_task(task: dict) -> str:
+async def route_task(task: dict) -> str:
     prompt = PromptTemplate.from_template("""
     Does the following task require external tools like web search? Answer only True or False.
     Notice, the decomposer says whether this task should use web search is {may_needs_tool}.
@@ -70,48 +99,157 @@ def route_task(task: dict) -> str:
     """)
     chain = prompt | deepseek_llm
     print(f"Routing task: {task}")
-    response = chain.invoke({"task": task["description"], "may_needs_tool": task["may_needs_tool"]}).content.strip().upper()
-    # Parse response to True or False, small case and then capitalize
-    response = response.lower().capitalize()
+    # Add timeout for the task
+    async def invoke_chain(current_chain):
+        try:
+            response = await asyncio.wait_for(current_chain.ainvoke({"task": task["description"], "may_needs_tool": task["may_needs_tool"]}), timeout=300)
+            response = response.content.strip().lower().capitalize()
+        except asyncio.TimeoutError:
+            raise asyncio.TimeoutError("Timeout error")
+        return response
 
-    if response not in ["True", "False"]:
+    response = None
+    for i in range(3):
+        if i == 2:
+            current_chain = prompt | volcengine_deepseek_llm
+        else:
+            current_chain = chain
+        try:
+            response = await invoke_chain(current_chain=current_chain)
+        except Exception as e:
+            print(f"Error in routing task: {traceback.format_exc()}")
+
+            if i == 2:
+                raise asyncio.TimeoutError("Timeout error")
+            time.sleep(30)
+            continue
+        break
+
+    need_tool = ""
+    if response.find("True") != -1:
+        need_tool = "True"
+    elif response.find("False") != -1:
+        need_tool = "False"
+    if need_tool not in ["True", "False"]:
         raise ValueError(f"Invalid response: {response}")
 
     needs_external_tool = "[ ]"
     if response == "True":
         needs_external_tool = "[X]"
-    print(f"Task {task['name']} needs external tools {needs_external_tool}")
+    print(f"Task: {task['name']} needs external tools {needs_external_tool}")
 
     return response
 
-async def web_search(task: dict) -> (List[str], str):
+async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], str):
     print(f"Searching the web for: {task['description']}")
+
+    # Decompose the task description into multiple search engine queries
+    prompt = PromptTemplate.from_template("""
+    Decompose the following task description into multiple search engine queries. Only return the queries as a comma-separated string.
+    The queries should be separated by a comma, do not add any serial numbers or newline characters, just the queries separated by commas.
+    The queries should be based on the task description.
+    The queries should be short and concise.
+    The queries should be designed specifically for web search, especially for search engines like DuckDuckGo, Google, SearXNG and Tavily.
+    Task Description: {description}
+    Your current knowledge and requirements: {knowledge}
+    """)
+
+    chain = prompt | deepseek_llm
+    response = chain.invoke({"description": task["description"], "knowledge": task_results}).content
+
+    queries = response.split(",")
+
+    print(f"Decomposed queries: {queries}")
+
+
     async def search_duckduckgo(query: str):
-        return await DuckDuckGoSearchResults().ainvoke(query)
+        # return await DuckDuckGoSearchResults(max_results=5).ainvoke(query)
+        return ""
 
     async def search_tavily(query: str):
-        return await TavilySearchResults().ainvoke(query)
+        # return await TavilySearchResults(max_results=3).ainvoke(query)
+        return ""
 
-    # Run both search tasks concurrently
-    duckduckgo_results, tavily_results = await asyncio.gather(search_duckduckgo(task["description"]), search_tavily(task["description"]))
-    # Get all links from the duckduckgo_results string, start with 'link: ', end with ',' or at the end of the string
-    duckduckgo_results_links = [link.split(",")[0] for link in duckduckgo_results.split("link: ")[1:]]
+    async def search_searx(query: str):
+        return await searchXNG.aresults(query, num_results=10, engines=["bing", "duckduckgo", "google", "yahoo", "wikipedia", "wikidata"])
+        return ""
+
+    tasks = []
+    tavily_content_list = []
+    results_links = []
+    duckduckgo_results_links = []
+    tavily_summary = ""
+    searxng_results_links = []
+    searxng_content_list = []
+    content_result = ""
+
+    for query in queries:
+        async def gather_search_results(query: str):
+            await asyncio.sleep(10)
+            for i in range(3):
+                try:
+                    # Run both search tasks concurrently
+                    duckduckgo_results, new_tavily_results, searxng_results = await asyncio.gather(search_duckduckgo(query), search_tavily(query), search_searx(query))
+                    # Get all links from the duckduckgo_results string, start with 'link: ', end with ',' or at the end of the string
+                    new_duckduckgo_results_links = [link.split(",")[0] for link in duckduckgo_results.split("link: ")[1:]]
+                    duckduckgo_results_links.extend(new_duckduckgo_results_links)
+                    new_searxng_results_links = [ item["link"] for item in searxng_results ]
+                    # searxng_results_links.extend(new_searxng_results_links)
+                    searxng_content_list.extend([item["snippet"] for item in searxng_results])
+
+                    new_tavily_contents = "\n".join(new_tavily_results)
+
+                    tavily_content_list.append(new_tavily_contents)
+                except Exception as e:
+                    print(f"Error in gathering search results: {traceback.format_exc()}")
+
+                    if i == 2:
+                        raise e
+                    time.sleep(30)
+                    continue
+
+        tasks.append(gather_search_results(query))
+
+    await asyncio.gather(*tasks)
 
     tavily_contents = ""
-    if tavily_results:
-        for result in tavily_results:
-            tavily_contents += result["content"] + "\n"
-    print(f"Tavily search results: {tavily_contents}")
+    for content in tavily_content_list:
+        tavily_contents += content + "\n"
+
+    searxng_contents = ""
+    for content in searxng_content_list:
+        searxng_contents += content + "\n"
+
+    content_result = tavily_contents + searxng_contents
+
+    prompt = PromptTemplate.from_template("""
+    Extract the main content from the web search results.
+    Do not miss any important information.
+    Merge same or similar information.
+    Remove any irrelevant information.
+    Current task: {task}
+    Web search result: {search_result}
+    """)
+
+    chain = prompt | deepseek_llm
+    content_summary = chain.invoke({"task": task["description"], "search_result": content_result}).content
+
+    print(f"Search content results: {content_summary}")
+    print(f"Tavily content: {tavily_contents}")
+    print(f"SearXNG content: {searxng_contents}")
     print(f"Duckduckgo links: {duckduckgo_results_links}")
-    return duckduckgo_results_links, tavily_contents
+    print(f"SearXNG links: {searxng_results_links}")
 
+    results_links.extend(duckduckgo_results_links)
+    results_links.extend(searxng_results_links)
+    return results_links, content_summary
 
-async def parse_search_links(search_links: List[str], task_description: str) -> str:
+async def parse_search_links(search_links: List[str], task_description: str, current_search_result: str) -> str:
     prompt = PromptTemplate.from_template("""
     Extract the main content from documents found in the search results.
-    
+
     Current task: {task}
-    
+
     Search html result parsed document by Playwright: {document}
     """
     )
@@ -122,9 +260,23 @@ async def parse_search_links(search_links: List[str], task_description: str) -> 
     search_results = []
 
     async_tasks = []
-    for document in data:
+    for index, document in enumerate(data):
         async def parse_document(document: str):
-            response = await chain.ainvoke({"document": document, "task": task_description})
+            response = None
+            for i in range(3):
+                if i == 2:
+                    current_chain = prompt | volcengine_deepseek_llm
+                else:
+                    current_chain = chain
+                try:
+                    response = await asyncio.wait_for(current_chain.ainvoke({"document": document, "task": task_description}), timeout=300)
+                    break
+                except Exception as e:
+                    print(f"Timeout error, for document index: {index}, error: {traceback.format_exc()}")
+                    if i == 2:
+                        raise asyncio.TimeoutError("Timeout error")
+                    time.sleep(30)
+                    continue
             result = response.content
             search_results.append(result)
 
@@ -132,18 +284,62 @@ async def parse_search_links(search_links: List[str], task_description: str) -> 
 
     await asyncio.gather(*async_tasks)
 
-    search_result = "\n".join(search_results)
-    print(f"Search result: {search_result}")
-    return search_result
+    search_result = current_search_result + "\n"
+    for result in search_results:
+        search_result += result + "\n"
 
-def execute_task(task: dict, task_results: Dict[str, str]) -> str:
+    prompt = PromptTemplate.from_template("""
+        Extract the main content from the web search results.
+        Do not miss any important information.
+        Merge same or similar information.
+        Remove any irrelevant information.
+        Current task: {task}
+        Web search results: {search_result}
+        """)
+
+    final_search_result = ""
+    chain = prompt | deepseek_llm
+    for i in range(3):
+        if i == 2:
+            current_chain = prompt | volcengine_deepseek_llm
+        else:
+            current_chain = chain
+        try:
+            final_search_result = current_chain.invoke({"task": task_description, "search_result": search_result}).content
+            break
+        except Exception as e:
+            print(f"Error in parsing search links: {traceback.format_exc()}")
+
+            if i == 2:
+                raise asyncio.TimeoutError("Timeout error")
+            time.sleep(30)
+            continue
+
+    print(f"Search result: {final_search_result}")
+    return final_search_result
+
+async def execute_task(task: dict, task_results: Dict[str, str]) -> str:
     prompt = PromptTemplate.from_template("""
     Complete task: {description}
     Your current knowledge: {knowledge}
     """)
     chain = prompt | deepseek_llm
     print(f"Executing task: {task}, with current knowledge: {task_results}")
-    return chain.invoke({"description": task["description"], "knowledge": task_results}).content
+    for i in range(3):
+        if i == 2:
+            current_chain = prompt | volcengine_deepseek_llm
+        else:
+            current_chain = chain
+        try:
+            response = await asyncio.wait_for(current_chain.ainvoke({"description": task["description"], "knowledge": task_results}), timeout=300)
+        except Exception as e:
+            print(f"Error in executing task: {traceback.format_exc()}")
+
+            if i == 2:
+                raise asyncio.TimeoutError("Timeout error")
+            time.sleep(30)
+            continue
+        return response.content
 
 def generate_report(results: Dict[str, str]) -> str:
     prompt = PromptTemplate.from_template("Create a detailed report from:\n{results}")
@@ -159,28 +355,28 @@ def decomposer_node(state: AgentState) -> dict:
         "current_task": tasks[0] if tasks else None
     }
 
-def router_node(state: AgentState) -> dict:
+async def router_node(state: AgentState) -> dict:
     if not state["current_task"]:
         return {}
-    needs_tool = route_task(state["current_task"])
+    needs_tool = await route_task(state["current_task"])
     return {"needs_tool": needs_tool}
 
 async def search_agent_node(state: AgentState) -> dict:
     if not state["current_task"]:
         return {}
-    search_links, tavily_content = await web_search(state["current_task"])
+    search_links, tavily_content = await web_search(state["current_task"], state["task_results"])
     return {"search_links": search_links, "task_result": tavily_content}
 
 async def search_result_parser_node(state: AgentState) -> dict:
     if not state["search_links"] or not state["current_task"]:
         return {}
-    search_result = await parse_search_links(state["search_links"], state["current_task"]["description"])
-    return {"task_result": state["task_result"] + search_result}
+    search_result = await parse_search_links(state["search_links"], state["current_task"]["description"], state["task_result"])
+    return {"task_result": search_result}
 
-def task_executor_node(state: AgentState) -> dict:
+async def task_executor_node(state: AgentState) -> dict:
     if not state["current_task"]:
         return {}
-    result = execute_task(state["current_task"], state["task_results"])
+    result = await execute_task(state["current_task"], state["task_results"])
     return {"task_result": result}
 
 def state_updater_node(state: AgentState) -> dict:
@@ -255,13 +451,14 @@ async def run_agent(your_task: str = None):
         "task_result": None,
         "report": None
     }
-    return await agent.ainvoke(initial_state)
+    return await agent.ainvoke(initial_state, config={"recursion_limit": 100})
 
-your_task = "Investigate the latest developments in cryptocurrency adoption by major financial institutions. Identify which banks or investment firms have recently integrated cryptocurrency services or products, and analyze how these integrations have impacted the overall market."
+your_task = "I am a beginner photographer. Find me some cameras, which lenses systems has decent optical performance, and good for landscape photography. Budget is below $600. And the weight of the camera should be less than 3 pounds. The camera cannot be older than 2018. It can be M43, APS-C, Full frame, also Point&Shoot."
 
 result = asyncio.run(run_agent(your_task))
 
-file_path = os.path.join("results", "report.md")
+file_name = "cameras.md"
+file_path = os.path.join("results", file_name)
 # Write the final report to a file
 with open(file_path, "w") as f:
     f.write(result["report"])
