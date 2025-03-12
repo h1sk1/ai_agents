@@ -42,6 +42,7 @@ class UniversalSpider(scrapy.Spider):
         self.allowed_domains = kwargs.get('allowed_domains', [])
         self.max_depth = kwargs.get('max_depth', 3)
         self.max_children_per_url = kwargs.get('max_children_per_url', 0)
+        self.url_timeout = kwargs.get('url_timeout', 30)  # Timeout in seconds
 
     def start_requests(self):
         for url in self.start_urls:
@@ -56,6 +57,7 @@ class UniversalSpider(scrapy.Spider):
                     'playwright_context_options': {
                         'ignore_https_errors': True,
                     },
+                    'download_timeout': self.url_timeout,
                 }
             )
 
