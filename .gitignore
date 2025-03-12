@@ -58,8 +58,6 @@ static/
 data/
 
 results/
-working/
+webcrawler/results/
 
 __pycache__/
-
-results/

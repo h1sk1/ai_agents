@@ -2,9 +2,15 @@ import asyncio
 import json
 import os
 import random
+import subprocess
 import time
 import traceback
+from threading import Thread
 from typing import TypedDict, List, Optional, Dict
+
+from huggingface_hub.utils import capture_output
+from langchain.agents.agent import RunnableAgent
+from langchain_core.runnables import RunnableSerializable
 from langgraph.graph import StateGraph, END
 from langchain.agents import tool
 from langchain_core.prompts import PromptTemplate
@@ -53,9 +59,6 @@ volcengine_deepseek_llm = ChatOpenAI(
 searchXNG = SearxSearchWrapper(
     searx_host=os.environ.get("SEARXNG_BASE_URL", "http://localhost:8080"),
 )
-
-# result = searchXNG.results("test", num_results=5, engines=["bing", "duckduckgo", "google", "yahoo", "wikipedia", "wikidata"])
-# print(result)
 
 class AgentState(TypedDict):
     user_input: str
@@ -172,7 +175,12 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
         return ""
 
     async def search_searx(query: str):
-        return await searchXNG.aresults(query, num_results=10, engines=["bing", "duckduckgo", "google", "yahoo", "wikipedia", "wikidata"])
+        search_engine_pool = ["bing", "google", "yahoo", "qwant", "duckduckgo"]
+        random.seed(time.time())
+        random.shuffle(search_engine_pool)
+        search_engine_list = search_engine_pool[:3]
+        search_engine_list.extend(["wikipedia", "wikidata"])
+        return await searchXNG.aresults(query, num_results=3, engines=search_engine_list)
         return ""
 
     tasks = []
@@ -196,13 +204,13 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
                     # Get all links from the duckduckgo_results string, start with 'link: ', end with ',' or at the end of the string
                     new_duckduckgo_results_links = [link.split(",")[0] for link in duckduckgo_results.split("link: ")[1:]]
                     duckduckgo_results_links.extend(new_duckduckgo_results_links)
-                    new_searxng_results_links = [ item["link"] for item in searxng_results ]
-                    # searxng_results_links.extend(new_searxng_results_links)
-                    searxng_content_list.extend([item["snippet"] for item in searxng_results])
+                    new_searxng_results_links = [ item["link"] for item in searxng_results ][:3]
+                    searxng_results_links.extend(new_searxng_results_links)
+                    # searxng_content_list.extend([item["snippet"] for item in searxng_results])
 
-                    new_tavily_contents = "\n".join(new_tavily_results)
-
-                    tavily_content_list.append(new_tavily_contents)
+                    # new_tavily_contents = "\n".join(new_tavily_results)
+                    #
+                    # tavily_content_list.append(new_tavily_contents)
                 except Exception as e:
                     print(f"Error in gathering search results: {traceback.format_exc()}")
 
@@ -234,8 +242,9 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
     Web search result: {search_result}
     """)
 
-    chain = prompt | deepseek_llm
-    content_summary = chain.invoke({"task": task["description"], "search_result": content_result}).content
+    content_summary = ""
+    # chain = prompt | deepseek_llm
+    # content_summary = chain.invoke({"task": task["description"], "search_result": content_result}).content
 
     print(f"Search content results: {content_summary}")
     print(f"Tavily content: {tavily_contents}")
@@ -250,21 +259,50 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
 async def parse_search_links(search_links: List[str], task_description: str, current_search_result: str) -> str:
     prompt = PromptTemplate.from_template("""
     Extract the main content from documents found in the search results.
+    Summarize the content and remove any irrelevant information.
+    Use pithy and concise language
+    Do not miss any important information.
 
     Current task: {task}
 
     Search html result parsed document by Playwright: {document}
     """
     )
-    loader = PlaywrightURLLoader(urls=search_links, remove_selectors=["header", "footer"])
-    data = await loader.aload()
-    chain = prompt | deepseek_llm
+
+
+    # Call scrapy from command line to get the search results
+    current_time = time.strftime("%Y%m%d_%H%M%S")
+    result_file_name = f"search_results_{current_time}.jsonl"
+    spider_result_file_path = os.path.join("results", result_file_name)
+    result_file_path = os.path.join("webcrawler/results", result_file_name)
+
+    project_dir = os.path.join(os.path.dirname(__file__), "webcrawler")
+    # Call command line to run scrapy
+    result = subprocess.run(
+        ["scrapy", "crawl", "universal_spider", "-a", f"urls={','.join(search_links)}", "-a", f"output_path={spider_result_file_path}"],
+        cwd=project_dir,
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise Exception(f"Failed to run scrapy: {result.stderr}")
+    else:
+        print(f"Scrapy spider ran successfully, output file: {spider_result_file_path}")
+
+    content = []
+    # Read results from the jsonl file
+    with open(result_file_path, "r") as f:
+        data = f.readlines()
+        for line in data:
+            json_data = json.loads(line)
+            content.append(json_data["content"])
 
     search_results = []
 
     async_tasks = []
-    for index, document in enumerate(data):
-        async def parse_document(document: str):
+    for index, document in enumerate(content):
+        async def parse_document(document: str, chain):
             response = None
             for i in range(3):
                 if i == 2:
@@ -283,7 +321,8 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
             result = response.content
             search_results.append(result)
 
-        async_tasks.append(parse_document(document))
+        chain = prompt | deepseek_llm
+        async_tasks.append(parse_document(document, chain))
 
     await asyncio.gather(*async_tasks)
 
@@ -464,9 +503,9 @@ The side-chain can be used for commercial.
 The side-chain needs to run as a private chain, cannot connect to current main/test blockchain network.
 The bridging solution should be secure and efficient.
 VSYS chain do not have any side-chain or bridging solution yet, so current bridging solutions will not work, we have to start from scratch.
-You need to study how VSYS chain works, including consensus, block generation, transaction processing, etc. from online resources and your own research. 
-You need to study how side-chain works, including consensus, block generation, transaction processing, etc. from online resources and your own research.
-You need to study how bridging solution works, including cross-chain communication, asset transfer, etc. from online resources and your own research.
+You need to study how VSYS chain works, including consensus, block generation, transaction processing, etc. from online resources.
+You need to study current evm compatible blockchain, including consensus, block generation, transaction processing, etc. which can be used as a side-chain, and can be used for commercial from online resources.
+You need to study how bridging solution works, including cross-chain communication, asset transfer, etc. from online resources.
 My final goal is tweaking VSYS chain and creating a bridge to a currently existing evm compatible blockchain as a side-chain.
 """
 
