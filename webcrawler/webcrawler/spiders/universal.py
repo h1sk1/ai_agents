@@ -58,8 +58,31 @@ class UniversalSpider(scrapy.Spider):
                         'ignore_https_errors': True,
                     },
                     'download_timeout': self.url_timeout,
+                    'playwright_page_init': self.page_init_handler,
                 }
             )
+
+    async def page_init_handler(self, page):
+        """Configure page settings before navigation"""
+        # Block loading of resource types we don't need
+        await page.route('**/*', self.route_handler)
+
+        # Optional: Set a user agent
+        await page.set_extra_http_headers(
+            {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+
+    @staticmethod
+    async def route_handler(self, route):
+        """Handle route interception to block unwanted resources"""
+        resource_type = route.request.resource_type
+
+        # Block these resource types to speed up crawling
+        blocked_resources = ['stylesheet', 'image', 'media', 'font', 'script', 'other']
+
+        if resource_type in blocked_resources:
+            await route.abort()
+        else:
+            await route.continue_()
 
     def is_pdf(self, response):
         """Check if the response is a PDF file"""
