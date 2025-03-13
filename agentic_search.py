@@ -3,17 +3,22 @@ import json
 import os
 import random
 import subprocess
+import sys
 import time
 import traceback
+from itertools import count
 from threading import Thread
 from typing import TypedDict, List, Optional, Dict
 
 from huggingface_hub.utils import capture_output
 from langchain.agents.agent import RunnableAgent
+from langchain.chains.question_answering.map_reduce_prompt import system_template
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableSerializable
 from langgraph.graph import StateGraph, END
 from langchain.agents import tool
-from langchain_core.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate, \
+    ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_deepseek import ChatDeepSeek
 from langchain_community.utilities import SearxSearchWrapper
@@ -72,13 +77,26 @@ class AgentState(TypedDict):
     report: Optional[str]      # Final report
 
 def decompose_tasks(user_input: str) -> List[dict]:
-    prompt = PromptTemplate.from_template("""
+    system_message = SystemMessagePromptTemplate.from_template("""
+    You are a professional task analyst. Your job is to decompose a user's input into a list of sequential tasks.
+    You do not have direct access to the internet, but you can use external tools like web search.
+    """)
+
+    human_message = HumanMessagePromptTemplate.from_template(
+    """
     Decompose the following user input into a list of sequential tasks. Each task should have a name, description, and a boolean indicating if it needs an external tool.
     The attribute should be named 'name', 'description', and 'may_needs_tool' respectively.
     The attribute 'needs_tool' should be a string value with capital 'True' or 'False' according to whether the task requires an external tool.
     Return the result as a JSON array.
     Input: {input}
-    """)
+    """
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        system_message,
+        human_message
+    ])
+
     chain = prompt | deepseek_reasoner_llm
     response = chain.invoke({"input": user_input}).content
     # Clean up the response
@@ -96,38 +114,40 @@ def decompose_tasks(user_input: str) -> List[dict]:
     return tasks
 
 async def route_task(task: dict) -> str:
-    prompt = PromptTemplate.from_template("""
-    Does the following task require external tools like web search? Answer only True or False.
-    Notice, the decomposer says whether this task should use web search is {may_needs_tool}.
-    Task Detail: {task}
-    """)
-    chain = prompt | deepseek_llm
+    # prompt = PromptTemplate.from_template("""
+    # Does the following task require external tools like web search? Answer only True or False.
+    # Notice, the decomposer says whether this task should use web search is {may_needs_tool}.
+    # Task Detail: {task}
+    # """)
+    # chain = prompt | deepseek_llm
     print(f"Routing task: {task}")
-    # Add timeout for the task
-    async def invoke_chain(current_chain):
-        try:
-            response = await asyncio.wait_for(current_chain.ainvoke({"task": task["description"], "may_needs_tool": task["may_needs_tool"]}), timeout=300)
-            response = response.content.strip().lower().capitalize()
-        except asyncio.TimeoutError:
-            raise asyncio.TimeoutError("Timeout error")
-        return response
+    # # Add timeout for the task
+    # async def invoke_chain(current_chain):
+    #     try:
+    #         response = await asyncio.wait_for(current_chain.ainvoke({"task": task["description"], "may_needs_tool": task["may_needs_tool"]}), timeout=300)
+    #         response = response.content.strip().lower().capitalize()
+    #     except asyncio.TimeoutError:
+    #         raise asyncio.TimeoutError("Timeout error")
+    #     return response
+    #
+    # response = None
+    # for i in range(3):
+    #     if i == 2:
+    #         current_chain = prompt | volcengine_deepseek_llm
+    #     else:
+    #         current_chain = chain
+    #     try:
+    #         response = await invoke_chain(current_chain=current_chain)
+    #     except Exception as e:
+    #         print(f"Error in routing task: {traceback.format_exc()}")
+    #
+    #         if i == 2:
+    #             raise asyncio.TimeoutError("Timeout error")
+    #         time.sleep(30)
+    #         continue
+    #     break
 
-    response = None
-    for i in range(3):
-        if i == 2:
-            current_chain = prompt | volcengine_deepseek_llm
-        else:
-            current_chain = chain
-        try:
-            response = await invoke_chain(current_chain=current_chain)
-        except Exception as e:
-            print(f"Error in routing task: {traceback.format_exc()}")
-
-            if i == 2:
-                raise asyncio.TimeoutError("Timeout error")
-            time.sleep(30)
-            continue
-        break
+    response = task["may_needs_tool"]
 
     need_tool = ""
     if response.find("True") != -1:
@@ -158,10 +178,10 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
     Your current knowledge and requirements: {knowledge}
     """)
 
-    chain = prompt | deepseek_llm
+    chain = prompt | deepseek_reasoner_llm
     response = chain.invoke({"description": task["description"], "knowledge": task_results}).content
 
-    queries = response.split(",")
+    queries = response.strip().split(",")
 
     print(f"Decomposed queries: {queries}")
 
@@ -175,11 +195,12 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
         return ""
 
     async def search_searx(query: str):
-        search_engine_pool = ["bing", "google", "yahoo", "qwant", "duckduckgo"]
-        random.seed(time.time())
-        random.shuffle(search_engine_pool)
-        search_engine_list = search_engine_pool[:3]
-        search_engine_list.extend(["wikipedia", "wikidata"])
+        # search_engine_pool = ["bing", "google", "yahoo", "qwant"]
+        # random.seed(time.time())
+        # random.shuffle(search_engine_pool)
+        # search_engine_list = search_engine_pool[:2]
+        # search_engine_list.extend(["wikipedia", "wikidata"])
+        search_engine_list = ["bing", "google", "yahoo", "wikipedia", "wikidata"]
         return await searchXNG.aresults(query, num_results=3, engines=search_engine_list)
         return ""
 
@@ -204,7 +225,7 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
                     # Get all links from the duckduckgo_results string, start with 'link: ', end with ',' or at the end of the string
                     new_duckduckgo_results_links = [link.split(",")[0] for link in duckduckgo_results.split("link: ")[1:]]
                     duckduckgo_results_links.extend(new_duckduckgo_results_links)
-                    new_searxng_results_links = [ item["link"] for item in searxng_results ][:3]
+                    new_searxng_results_links = [ item["link"] for item in searxng_results ][:1]
                     searxng_results_links.extend(new_searxng_results_links)
                     # searxng_content_list.extend([item["snippet"] for item in searxng_results])
 
@@ -269,34 +290,79 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
     """
     )
 
+    print(f"Parsing {len(search_links)} search links...")
 
     # Call scrapy from command line to get the search results
     current_time = time.strftime("%Y%m%d_%H%M%S")
-    result_file_name = f"search_results_{current_time}.jsonl"
-    spider_result_file_path = os.path.join("results", result_file_name)
-    result_file_path = os.path.join("webcrawler/results", result_file_name)
+    scrapy_dir = os.path.join(os.path.dirname(__file__), "webcrawler")
 
-    project_dir = os.path.join(os.path.dirname(__file__), "webcrawler")
-    # Call command line to run scrapy
-    result = subprocess.run(
-        ["scrapy", "crawl", "universal_spider", "-a", f"urls={','.join(search_links)}", "-a", f"output_path={spider_result_file_path}"],
-        cwd=project_dir,
-        capture_output=True,
-        text=True
-    )
+    # Divide the search links into batches of 5
+    search_links_batches = [search_links[i:i + 5] for i in range(0, len(search_links), 5)]
 
-    if result.returncode != 0:
-        raise Exception(f"Failed to run scrapy: {result.stderr}")
-    else:
-        print(f"Scrapy spider ran successfully, output file: {spider_result_file_path}")
+
+    # Call scrapy from command line to get the search results
+    current_time = time.strftime("%Y%m%d_%H%M%S")
+    scrapy_dir = os.path.join(os.path.dirname(__file__), "webcrawler")
+
+    # Divide the search links into batches of 5
+    search_links_batches = [search_links[i:i + 5] for i in range(0, len(search_links), 5)]
+
+    async def run_scrapy_with_file_monitor(scrapy_dir, search_links, spider_result_file_path, timeout=120):
+        # Start the scrapy process using asyncio subprocess
+        process = await asyncio.create_subprocess_exec(
+            "scrapy", "crawl", "universal_spider",
+            "-a", f"urls={','.join(search_links)}",
+            "-a", f"output_path={spider_result_file_path}",
+            cwd=scrapy_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+
+        start_time = time.time()
+
+        # Monitor the process non-blockingly
+        try:
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            return_code = process.returncode
+
+            # Print output and error
+            if stdout:
+                print(f"Scrapy stdout: {stdout.decode()}")
+            if stderr:
+                print(f"Scrapy stderr: {stderr.decode()}")
+
+            if return_code != 0 and not os.path.exists(spider_result_file_path):
+                raise Exception(f"Failed to run scrapy: {stderr.decode()}")
+            else:
+                print(f"Scrapy spider completed, output file: {spider_result_file_path}")
+
+        except asyncio.TimeoutError:
+            print(f"Scrapy process timed out after {timeout} seconds, terminating...")
+            process.terminate()
+            await process.wait()
+
+    # Use asyncio to run multiple scrapy processes concurrently
+    tasks = []
+    for index, search_links_batch in enumerate(search_links_batches):
+        result_file_name = f"search_results_{current_time}_{index}.jsonl"
+        result_file_path = os.path.join(scrapy_dir, "results", result_file_name)
+        tasks.append(run_scrapy_with_file_monitor(scrapy_dir, search_links_batch, result_file_path))
+
+    await asyncio.gather(*tasks)
 
     content = []
-    # Read results from the jsonl file
-    with open(result_file_path, "r") as f:
-        data = f.readlines()
-        for line in data:
-            json_data = json.loads(line)
-            content.append(json_data["content"])
+
+    for index, search_links_batch in enumerate(search_links_batches):
+        result_file_name = f"search_results_{current_time}_{index}.jsonl"
+        result_file_path = os.path.join(scrapy_dir, "results", result_file_name)
+        # Read results from the jsonl file
+        with open(result_file_path, "r") as f:
+            data = f.readlines()
+            for line in data:
+                json_data = json.loads(line)
+                # Check if json_data contains 'content' key
+                if "content" in json_data:
+                    content.append(json_data["content"])
 
     search_results = []
 
@@ -340,7 +406,7 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
         """)
 
     final_search_result = ""
-    chain = prompt | deepseek_llm
+    chain = prompt | deepseek_reasoner_llm
     for i in range(3):
         if i == 2:
             current_chain = prompt | volcengine_deepseek_llm
@@ -383,11 +449,31 @@ async def execute_task(task: dict, task_results: Dict[str, str]) -> str:
             continue
         return response.content
 
-def generate_report(results: Dict[str, str]) -> str:
-    prompt = PromptTemplate.from_template("Create a detailed report from:\n{results}")
+def generate_report(user_task: str, results: Dict[str, str]) -> str:
+    system_message = SystemMessagePromptTemplate.from_template(
+        """
+        You are a professional analyst.
+        Your job is to analyze the user's task and the results obtained from the tasks.
+        Finally generate a detailed report based on the user's task and the results with your analysis.
+        """
+    )
+    human_message = HumanMessagePromptTemplate.from_template(
+        """
+        User task is as follows:
+        {user_task}
+        Generate a detailed report from the following results:
+        {results}
+        """
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        system_message,
+        human_message
+    ])
+
     chain = prompt | deepseek_reasoner_llm
     print(f"Generating report from results: {results}")
-    return chain.invoke({"results": results}).content
+    return chain.invoke({"user_task": user_task, "results": results}).content
 
 def decomposer_node(state: AgentState) -> dict:
     tasks = decompose_tasks(state["user_input"])
@@ -448,7 +534,7 @@ def state_updater_node(state: AgentState) -> dict:
 def report_generator_node(state: AgentState) -> dict:
     if not state["task_results"]:
         return {"report": "No results to report."}
-    report = generate_report(state["task_results"])
+    report = generate_report(state["user_input"], state["task_results"])
     return {"report": report}
 
 workflow = StateGraph(AgentState)
@@ -507,12 +593,13 @@ You need to study how VSYS chain works, including consensus, block generation, t
 You need to study current evm compatible blockchain, including consensus, block generation, transaction processing, etc. which can be used as a side-chain, and can be used for commercial from online resources.
 You need to study how bridging solution works, including cross-chain communication, asset transfer, etc. from online resources.
 My final goal is tweaking VSYS chain and creating a bridge to a currently existing evm compatible blockchain as a side-chain.
+You should provide a detailed report on the side-chain and bridging solutions you found, including potential evm compatible blockchains that can be used as a side-chain, and bridging solutions that can be used to connect VSYS chain with the side-chain.
 """
 
 result = asyncio.run(run_agent(your_task))
 
-file_name = "vsys-side-chain.md"
-file_path = os.path.join("results", file_name)
+file_name = "vsys-side-chain-1.md"
+file_path = os.path.join(os.path.dirname(__file__), "results", file_name)
 # Write the final report to a file
 with open(file_path, "w") as f:
     f.write(result["report"])
