@@ -67,6 +67,7 @@ searchXNG = SearxSearchWrapper(
 
 class AgentState(TypedDict):
     user_input: str
+    user_task_summary: str
     all_tasks: List[dict]
     tasks: List[dict]
     task_results: Dict[str, str]
@@ -76,9 +77,18 @@ class AgentState(TypedDict):
     search_links: Optional[List[str]]  # Search links
     report: Optional[str]      # Final report
 
-def decompose_tasks(user_input: str) -> List[dict]:
+def decompose_tasks(user_input: str) -> (str, List[dict]):
     system_message = SystemMessagePromptTemplate.from_template("""
-    You are a professional task analyst. Your job is to decompose a user's input into a list of sequential tasks.
+    You are a professional task analyst.
+    Your job is to analyze user input and give a summary of the task. And decompose the user's input into a list of sequential tasks.
+    The format of your summary should be a JSON array, the details are as follows:
+    1. The first object in the array should be the summary of the user's input. The object should only have a single key 'summary' with the value as the summary of the user's input.
+        a. The attribute should be named 'summary'.
+        b. The attribute 'summary' should be a string value.
+    2. Then decompose the following user input into a list of sequential tasks. Each task should have a name, description, and a boolean indicating if it needs an external tool.
+        a. The attribute should be named 'name', 'description', and 'may_needs_tool' respectively.
+        b. The attribute 'needs_tool' should be a string value with capital 'True' or 'False' according to whether the task requires an external tool.
+    Return the result as a JSON array.
     You do not have direct access to the internet, but you can use external tools like web search.
     """)
 
@@ -86,10 +96,7 @@ def decompose_tasks(user_input: str) -> List[dict]:
     human_message = HumanMessagePromptTemplate.from_template(
     """
     Current time: {current_time}
-    Decompose the following user input into a list of sequential tasks. Each task should have a name, description, and a boolean indicating if it needs an external tool.
-    The attribute should be named 'name', 'description', and 'may_needs_tool' respectively.
-    The attribute 'needs_tool' should be a string value with capital 'True' or 'False' according to whether the task requires an external tool.
-    Return the result as a JSON array.
+    
     Input: {input}
     """
     )
@@ -107,13 +114,28 @@ def decompose_tasks(user_input: str) -> List[dict]:
     # Find last occurrence of ] and remove everything after it
     response = response[:response.rindex("]") + 1]
 
-    tasks = json.loads(response) # Parse JSON string to list of dicts
+    result = json.loads(response) # Parse JSON string to list of dicts
+
+    # Check if the result format is correct
+    # Check if the first object has a key 'summary'
+    if "summary" not in result[0]:
+        raise ValueError("Invalid task summary format")
+    # Check if the decomposed tasks have the correct keys
+    for task in result[1:]:
+        if "name" not in task or "description" not in task or "may_needs_tool" not in task:
+            raise ValueError("Invalid task format")
+
+    user_task_summary = result[0]["summary"]
+    tasks = result[1:]
+
+    print(f"User task summary: {user_task_summary}\n\n")
 
     print(f"Decomposed tasks:")
     for task in tasks:
         print(f"Task: {task['name']}, Description: {task['description']}, May Needs tool: {task['may_needs_tool']}")
     print("\n")
-    return tasks
+
+    return user_task_summary, tasks
 
 async def route_task(task: dict) -> str:
     # current_time = time.strftime("%Y%m%d_%H%M%S")
@@ -492,9 +514,10 @@ def generate_report(user_task: str, results: Dict[str, str]) -> str:
     human_message = HumanMessagePromptTemplate.from_template(
         """
         Current time: {current_time}
-        User task is as follows:
+        User original task summary is as follows:
         {user_task}
-        Generate a detailed report from the following results:
+        
+        User decomposed tasks and their results which were obtained from external tools like web search or analyzed by analysts:
         {results}
         """
     )
@@ -547,8 +570,9 @@ def generate_file_name(user_task: str, report: str) -> str:
     return chain.invoke({"user_task": user_task, "report": report}).content
 
 def decomposer_node(state: AgentState) -> dict:
-    tasks = decompose_tasks(state["user_input"])
+    user_task_summary, tasks = decompose_tasks(state["user_input"])
     return {
+        "user_task_summary": user_task_summary,
         "all_tasks": tasks,
         "tasks": tasks,
         "current_task": tasks[0] if tasks else None
@@ -605,7 +629,7 @@ def state_updater_node(state: AgentState) -> dict:
 def report_generator_node(state: AgentState) -> dict:
     if not state["task_results"]:
         return {"report": "No results to report."}
-    report = generate_report(state["user_input"], state["task_results"])
+    report = generate_report(state["user_task_summary"], state["task_results"])
     print(f"Generated report: {report}")
     return {"report": report}
 
@@ -621,8 +645,6 @@ def file_generator_node(state: AgentState):
 
     report_file_name = "report"
     report_reference_file_name = report_file_name + "_reference"
-
-
 
     current_time = time.strftime("%Y%m%d_%H%M%S")
     report_file_name = report_file_name + "_" + current_time + ".md"
@@ -680,6 +702,7 @@ agent = workflow.compile()
 async def run_agent(your_task: str = None):
     initial_state = {
         "user_input": your_task,
+        "user_task_summary": "",
         "tasks": [],
         "task_results": {},
         "current_task": None,
