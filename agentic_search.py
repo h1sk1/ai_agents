@@ -592,13 +592,14 @@ VSYS chain do not have any side-chain or bridging solution yet, so current bridg
 You need to study how VSYS chain works, including consensus, block generation, transaction processing, etc. from online resources.
 You need to study current evm compatible blockchain, including consensus, block generation, transaction processing, etc. which can be used as a side-chain, and can be used for commercial from online resources.
 You need to study how bridging solution works, including cross-chain communication, asset transfer, etc. from online resources.
-My final goal is tweaking VSYS chain and creating a bridge to a currently existing evm compatible blockchain as a side-chain.
+My final goal is tweaking VSYS chain and creating a bridge to a currently existing evm compatible blockchain as a side-chain, especially by building a witness (Oracle) node that can communicate with the side-chain, and without touching the funds on both chains, to avoid becoming VASP (Virtual Asset Service Provider).
 You should provide a detailed report on the side-chain and bridging solutions you found, including potential evm compatible blockchains that can be used as a side-chain, and bridging solutions that can be used to connect VSYS chain with the side-chain.
 """
 
 result = asyncio.run(run_agent(your_task))
 
-file_name = "vsys-side-chain-1.md"
+current_time = time.strftime("%Y%m%d_%H%M%S")
+file_name = "vsys_side_chain_report_" + current_time + ".md"
 file_path = os.path.join(os.path.dirname(__file__), "results", file_name)
 # Write the final report to a file
 with open(file_path, "w") as f:
