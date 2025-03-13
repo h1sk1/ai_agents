@@ -82,8 +82,10 @@ def decompose_tasks(user_input: str) -> List[dict]:
     You do not have direct access to the internet, but you can use external tools like web search.
     """)
 
+    current_time = time.strftime("%Y%m%d_%H%M%S")
     human_message = HumanMessagePromptTemplate.from_template(
     """
+    Current time: {current_time}
     Decompose the following user input into a list of sequential tasks. Each task should have a name, description, and a boolean indicating if it needs an external tool.
     The attribute should be named 'name', 'description', and 'may_needs_tool' respectively.
     The attribute 'needs_tool' should be a string value with capital 'True' or 'False' according to whether the task requires an external tool.
@@ -98,7 +100,7 @@ def decompose_tasks(user_input: str) -> List[dict]:
     ])
 
     chain = prompt | deepseek_reasoner_llm
-    response = chain.invoke({"input": user_input}).content
+    response = chain.invoke({"current_time": current_time, "input": user_input}).content
     # Clean up the response
     # Find first occurrence of [ and remove everything before it
     response = response[response.index("["):]
@@ -114,7 +116,10 @@ def decompose_tasks(user_input: str) -> List[dict]:
     return tasks
 
 async def route_task(task: dict) -> str:
-    # prompt = PromptTemplate.from_template("""
+    # current_time = time.strftime("%Y%m%d_%H%M%S")
+    # prompt = PromptTemplate.from_template(
+    # """
+    # Current time: {current_time}
     # Does the following task require external tools like web search? Answer only True or False.
     # Notice, the decomposer says whether this task should use web search is {may_needs_tool}.
     # Task Detail: {task}
@@ -124,7 +129,7 @@ async def route_task(task: dict) -> str:
     # # Add timeout for the task
     # async def invoke_chain(current_chain):
     #     try:
-    #         response = await asyncio.wait_for(current_chain.ainvoke({"task": task["description"], "may_needs_tool": task["may_needs_tool"]}), timeout=300)
+    #         response = await asyncio.wait_for(current_chain.ainvoke({"current_time": current_time, "task": task["description"], "may_needs_tool": task["may_needs_tool"]}), timeout=300)
     #         response = response.content.strip().lower().capitalize()
     #     except asyncio.TimeoutError:
     #         raise asyncio.TimeoutError("Timeout error")
@@ -167,8 +172,11 @@ async def route_task(task: dict) -> str:
 async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], str):
     print(f"Searching the web for: {task['description']}")
 
+    current_time = time.strftime("%Y%m%d_%H%M%S")
     # Decompose the task description into multiple search engine queries
-    prompt = PromptTemplate.from_template("""
+    prompt = PromptTemplate.from_template(
+    """
+    Current time: {current_time}
     Decompose the following task description into multiple search engine queries. Only return the queries as a comma-separated string.
     The queries should be separated by a comma, do not add any serial numbers or newline characters, just the queries separated by commas.
     The queries should be based on the task description.
@@ -177,10 +185,11 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
     The queries can be both English and Chinese.
     Task Description: {description}
     Your current knowledge and requirements: {knowledge}
-    """)
+    """
+    )
 
     chain = prompt | deepseek_reasoner_llm
-    response = chain.invoke({"description": task["description"], "knowledge": task_results}).content
+    response = chain.invoke({"current_time": current_time, "description": task["description"], "knowledge": task_results}).content
 
     queries = response.strip().split(",")
 
@@ -226,7 +235,7 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
                     # Get all links from the duckduckgo_results string, start with 'link: ', end with ',' or at the end of the string
                     new_duckduckgo_results_links = [link.split(",")[0] for link in duckduckgo_results.split("link: ")[1:]]
                     duckduckgo_results_links.extend(new_duckduckgo_results_links)
-                    new_searxng_results_links = [ item["link"] for item in searxng_results ][:1]
+                    new_searxng_results_links = [ item["link"] for item in searxng_results if "link" in item ][0:1]
                     searxng_results_links.extend(new_searxng_results_links)
                     # searxng_content_list.extend([item["snippet"] for item in searxng_results])
 
@@ -238,7 +247,7 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
 
                     if i == 2:
                         raise e
-                    time.sleep(30)
+                    time.sleep(5)
                     continue
 
         tasks.append(gather_search_results(query))
@@ -279,7 +288,9 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
     return results_links, content_summary
 
 async def parse_search_links(search_links: List[str], task_description: str, current_search_result: str) -> str:
-    prompt = PromptTemplate.from_template("""
+    prompt = PromptTemplate.from_template(
+    """
+    Current time: {current_time}
     Extract the main content from documents found in the search results.
     Summarize the content and remove any irrelevant information.
     Use pithy and concise language
@@ -309,6 +320,9 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
     search_links_batches = [search_links[i:i + 5] for i in range(0, len(search_links), 5)]
 
     async def run_scrapy_with_file_monitor(scrapy_dir, search_links, spider_result_file_path, timeout=120):
+        random.seed(time.time())
+        random_num = random.randint(1, 10)
+        await asyncio.sleep(random_num)
         # Start the scrapy process using asyncio subprocess
         process = await asyncio.create_subprocess_exec(
             "scrapy", "crawl", "universal_spider",
@@ -319,18 +333,16 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
             stderr=asyncio.subprocess.PIPE
         )
 
-        start_time = time.time()
-
         # Monitor the process non-blockingly
         try:
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
             return_code = process.returncode
 
             # Print output and error
-            if stdout:
-                print(f"Scrapy stdout: {stdout.decode()}")
-            if stderr:
-                print(f"Scrapy stderr: {stderr.decode()}")
+            # if stdout:
+            #     print(f"Scrapy stdout: {stdout.decode()}")
+            # if stderr:
+            #     print(f"Scrapy stderr: {stderr.decode()}")
 
             if return_code != 0 and not os.path.exists(spider_result_file_path):
                 raise Exception(f"Failed to run scrapy: {stderr.decode()}")
@@ -340,7 +352,11 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
         except asyncio.TimeoutError:
             print(f"Scrapy process timed out after {timeout} seconds, terminating...")
             process.terminate()
-            await process.wait()
+            try:
+                # Short timeout for the wait call
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                print(f"Process kill wait timed out, continuing anyway...")
 
     # Use asyncio to run multiple scrapy processes concurrently
     tasks = []
@@ -350,6 +366,8 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
         tasks.append(run_scrapy_with_file_monitor(scrapy_dir, search_links_batch, result_file_path))
 
     await asyncio.gather(*tasks)
+
+    print(f"Scrapy processes completed, parsing search results...")
 
     content = []
 
@@ -377,7 +395,7 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
                 else:
                     current_chain = chain
                 try:
-                    response = await asyncio.wait_for(current_chain.ainvoke({"document": document, "task": task_description}), timeout=300)
+                    response = await asyncio.wait_for(current_chain.ainvoke({"current_time": current_time, "document": document, "task": task_description}), timeout=300)
                     break
                 except Exception as e:
                     print(f"Timeout error, for document index: {index}, error: {traceback.format_exc()}")
@@ -397,14 +415,17 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
     for result in search_results:
         search_result += result + "\n"
 
-    prompt = PromptTemplate.from_template("""
-        Extract the main content from the web search results.
-        Do not miss any important information.
-        Merge same or similar information.
-        Remove any irrelevant information.
-        Current task: {task}
-        Web search results: {search_result}
-        """)
+    prompt = PromptTemplate.from_template(
+    """
+    Current time: {current_time}
+    Extract the main content from the web search results.
+    Do not miss any important information.
+    Merge same or similar information.
+    Remove any irrelevant information.
+    Current task: {task}
+    Web search results: {search_result}
+    """
+    )
 
     final_search_result = ""
     chain = prompt | deepseek_reasoner_llm
@@ -414,7 +435,7 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
         else:
             current_chain = chain
         try:
-            final_search_result = current_chain.invoke({"task": task_description, "search_result": search_result}).content
+            final_search_result = current_chain.invoke({"current_time": current_time, "task": task_description, "search_result": search_result}).content
             break
         except Exception as e:
             print(f"Error in parsing search links: {traceback.format_exc()}")
@@ -428,10 +449,14 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
     return final_search_result
 
 async def execute_task(task: dict, task_results: Dict[str, str]) -> str:
-    prompt = PromptTemplate.from_template("""
+    current_time = time.strftime("%Y%m%d_%H%M%S")
+    prompt = PromptTemplate.from_template(
+    """
+    Current time: {current_time}
     Complete task: {description}
     Your current knowledge: {knowledge}
-    """)
+    """
+    )
     chain = prompt | deepseek_llm
     print(f"Executing task: {task}, with current knowledge: {task_results}")
     for i in range(3):
@@ -440,7 +465,7 @@ async def execute_task(task: dict, task_results: Dict[str, str]) -> str:
         else:
             current_chain = chain
         try:
-            response = await asyncio.wait_for(current_chain.ainvoke({"description": task["description"], "knowledge": task_results}), timeout=300)
+            response = await asyncio.wait_for(current_chain.ainvoke({"current_time": current_time, "description": task["description"], "knowledge": task_results}), timeout=300)
         except Exception as e:
             print(f"Error in executing task: {traceback.format_exc()}")
 
@@ -451,15 +476,18 @@ async def execute_task(task: dict, task_results: Dict[str, str]) -> str:
         return response.content
 
 def generate_report(user_task: str, results: Dict[str, str]) -> str:
+    current_time = time.strftime("%Y%m%d_%H%M%S")
     system_message = SystemMessagePromptTemplate.from_template(
         """
-        You are a professional data analyst.
-        Your job is to analyze the user's task and the results obtained from the tasks.
+        You are a professional project analyst.
+        Your job is to analyze the user's task and the results obtained from external tools like web search.
         Finally generate a detailed report based on the user's task and the results with your analysis.
+        Please do not miss any important information and be as detailed as possible.
         """
     )
     human_message = HumanMessagePromptTemplate.from_template(
         """
+        Current time: {current_time}
         User task is as follows:
         {user_task}
         Generate a detailed report from the following results:
@@ -474,7 +502,7 @@ def generate_report(user_task: str, results: Dict[str, str]) -> str:
 
     chain = prompt | deepseek_reasoner_llm
     print(f"Generating report from results: {results}")
-    return chain.invoke({"user_task": user_task, "results": results}).content
+    return chain.invoke({"current_time": current_time, "user_task": user_task, "results": results}).content
 
 
 def generate_file_name(user_task: str, report: str) -> str:
@@ -574,21 +602,42 @@ def report_generator_node(state: AgentState) -> dict:
     if not state["task_results"]:
         return {"report": "No results to report."}
     report = generate_report(state["user_input"], state["task_results"])
+    print(f"Generated report: {report}")
     return {"report": report}
 
 def file_generator_node(state: AgentState):
     if not state["report"]:
         return
 
-    file_name = generate_file_name(state["user_input"], state["report"])
-    current_time = time.strftime("%Y%m%d_%H%M%S")
-    file_name = file_name + "_" + current_time + ".md"
-    file_path = os.path.join(os.path.dirname(__file__), "results", file_name)
-    # Write the final report to a file
-    with open(file_path, "w") as f:
-        f.write(result["report"])
+    report_file_name = generate_file_name(state["user_input"], state["report"])
 
-    print(f"Report {file_path} generated successfully!")
+    # Check if the file name is valid as a file name
+    if not report_file_name.isidentifier():
+        print(f"Invalid file name: {report_file_name}")
+
+    report_file_name = "report"
+    report_reference_file_name = report_file_name + "_reference"
+
+
+
+    current_time = time.strftime("%Y%m%d_%H%M%S")
+    report_file_name = report_file_name + "_" + current_time + ".md"
+    report_file_name = os.path.join(os.path.dirname(__file__), "results", report_file_name)
+    # Write the final report to a file
+    with open(report_file_name, "w") as f:
+        f.write(state["report"])
+
+    report_reference_file_name = report_reference_file_name + "_" + current_time + ".md"
+    report_reference_file_name = os.path.join(os.path.dirname(__file__), "results", report_reference_file_name)
+    # Write the report reference to a file
+    with open(report_reference_file_name, "w") as f:
+        # Write the task_results to the reference file
+        f.write("Task Results:\n")
+        for task, result in state["task_results"].items():
+            f.write(f"Task: {task}\n")
+            f.write(f"Result: {result}\n\n")
+
+    print(f"Report {report_file_name} generated successfully!")
 
 workflow = StateGraph(AgentState)
 
@@ -637,18 +686,82 @@ async def run_agent(your_task: str = None):
     return await agent.ainvoke(initial_state, config={"recursion_limit": 100})
 
 your_task = """
-I'm currently working on a project to build a evm compatible side-chain for VSYS chain.
-Find and compare side-chain and bridging solutions for VSYS chain.
-The side-chain needs to be compatible with EVM and support smart contracts.
-The side-chain can be used for commercial.
-The side-chain needs to run as a private chain, cannot connect to current main/test blockchain network.
-The bridging solution should be secure and efficient.
-VSYS chain do not have any side-chain or bridging solution yet, so current bridging solutions will not work, we have to start from scratch.
-You need to study how VSYS chain works, including consensus, block generation, transaction processing, etc. from online resources.
-You need to study current evm compatible blockchain, including consensus, block generation, transaction processing, etc. which can be used as a side-chain, and can be used for commercial from online resources.
-You need to study how bridging solution works, including cross-chain communication, asset transfer, etc. from online resources.
-My final goal is tweaking VSYS chain and creating a bridge to a currently existing evm compatible blockchain as a side-chain, especially by building a witness (Oracle) node that can communicate with the side-chain, and without touching the funds on both chains, to avoid becoming VASP (Virtual Asset Service Provider).
-You should provide a detailed report on the side-chain and bridging solutions you found, including potential evm compatible blockchains that can be used as a side-chain, and bridging solutions that can be used to connect VSYS chain with the side-chain.
+Act as a senior cross-border e-commerce consultant specializing in handmade crafts, create a comprehensive market entry strategy report for a Chinese individual seller targeting **North America & Europe**. Focus on cultural adaptation and practical solutions for small-scale sellers. Structure your analysis as follows:
+
+---
+
+### **1. Market Analysis for Western Markets**  
+1.1 **Demand Insights**  
+- Top 3 trending handmade categories in US/Europe (2021-2025) with growth data  
+- Western consumers' premium preferences: Eco-friendly materials vs. price sensitivity analysis  
+- Seasonal demand patterns (holiday peaks, wedding seasons, etc.)  
+
+1.2 **Competition Breakdown**  
+- Key competitors analysis: Chinese sellers vs. local artisans on Etsy/Amazon Handmade  
+- Underserved niches combining Chinese cultural elements with Western aesthetics (e.g., minimalist Zen decor, modernized embroidery accessories)  
+
+---
+
+### **2. Product Strategy for Cross-Cultural Appeal**  
+2.1 **Cultural Fusion Design**  
+- How to reinterpret traditional Chinese crafts (e.g., porcelain, silk knotting) for Scandinavian/Boho/Modern Farmhouse styles  
+- Storytelling angles: "Silk Road Heritage meets Modern Design" / "Zero-Waste Chinese Craftsmanship"  
+
+2.2 **Pricing & Packaging**  
+- Price benchmarking: Successful Chinese sellers' pricing on Etsy vs. local competitors  
+- Western-style packaging requirements: Sustainable materials, unboxing experience expectations  
+
+---
+
+### **3. Platform Optimization for Chinese Sellers**  
+3.1 **Channel Selection**  
+- Platform comparison: Etsy fees vs. Amazon Handmade vs. Shopify (Chinese seller success rates)  
+- Step-by-step Etsy shop setup guide for China-based individuals (ID verification alternatives)  
+
+3.2 **Shipping Solutions**  
+- Best couriers for China-to-West small parcels: Yanwen vs. CNE vs. DHL eCommerce  
+- Customs cheat sheet: HS codes for handmade items, EU VAT thresholds (2025 update)  
+
+3.3 **Compliance Must-Knows**  
+- Western certifications for Chinese crafts: CE marking for home decor, EN71 for toys  
+- Payment must-haves: PayPal business account setup from China, Stripe alternatives  
+
+---
+
+### **4. Culturally-Smart Marketing**  
+4.1 **Content That Converts**  
+- TikTok/Instagram Reels ideas: Craft-making process videos with Western-friendly captions  
+- Pinterest SEO: Keyword combinations for "Chinese modern [product category]"  
+
+4.2 **Cultural Pitfalls**  
+- Taboo color combinations (e.g., red/black in Germany)  
+- Western gift-giving etiquette for packaging cards  
+
+4.3 **Customer Retention**  
+- Email marketing templates for cross-cultural communication  
+- Handling returns: Cost-effective solutions for China-based sellers  
+
+---
+
+### **5. Risk Management**  
+5.1 **Red Flags for Chinese Sellers**  
+- Common IP issues: Avoiding Disney/Brand motifs in fan art  
+- Exchange rate hedging tools for USD/EUR transactions  
+
+5.2 **Bootstrapping Plan**  
+- Minimum startup budget breakdown (RMB 5k-20k range)  
+- MVP testing strategy: 3 high-demand low-cost products  
+
+---
+
+**Special Add-ons:**  
+- Case studies: 3 Chinese Etsy sellers achieving $10k+/month revenue  
+- Tools: Best AI-powered translation tools for product descriptions  
+- 120-Day Launch Roadmap:  
+  W1-4: Product Selection & Certification  
+  W5-8: Store Setup & Sample Shooting  
+  W9-12: First Campaign & Logistics Test  
+  W13-16: Scale-Up & Review Management
 """
 
 result = asyncio.run(run_agent(your_task))

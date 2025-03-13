@@ -30,6 +30,7 @@ class UniversalSpider(scrapy.Spider):
         'FEED_EXPORT_ENCODING': 'utf-8',
         'FEED_EXPORT_FIELDS': ['url', 'title', 'content', 'depth', 'status', 'is_pdf'],
         'FEED_FORMAT': 'jsonl',
+        'FEED_EXPORT_INDENT': None,  # Use compact format for better encoding compatibility
     }
 
     def __init__(self, *args, **kwargs):
@@ -91,6 +92,27 @@ class UniversalSpider(scrapy.Spider):
 
         return 'application/pdf' in content_type or url.endswith('.pdf')
 
+    def _sanitize_text(self, text):
+        """Clean text to ensure it can be encoded properly"""
+        if text is None:
+            return ""
+
+        # Replace or remove problematic characters
+        # Option 1: Replace with approximate ASCII
+        try:
+            # Normalize to NFKD form and remove non-ASCII
+            import unicodedata
+            text = unicodedata.normalize('NFKD', text)
+
+            # Encode and decode with error handling
+            text = text.encode('utf-8', errors='replace').decode('utf-8')
+        except Exception as e:
+            self.logger.warning(f"Text sanitization error: {e}")
+            # Fall back to basic ASCII
+            text = str(text.encode('ascii', errors='ignore').decode('ascii', errors='ignore'))
+
+        return text
+
     async def parse(self, response):
         depth = response.meta.get('depth', 3)
         if depth > self.max_depth:
@@ -129,23 +151,30 @@ class UniversalSpider(scrapy.Spider):
                 temp_file.write(response.body)
                 temp_path = temp_file.name
 
-            # Extract text from PDF using PyMuPDF
+            # Extract text from PDF using PyMuPDF with encoding error handling
             pdf_content = ""
             with fitz.open(temp_path) as pdf_document:
                 title = pdf_document.metadata.get('title', os.path.basename(response.url))
                 for page_num in range(len(pdf_document)):
                     page = pdf_document[page_num]
-                    pdf_content += page.get_text()
+                    # Get text and handle potential encoding issues
+                    try:
+                        page_text = page.get_text()
+                        # Clean or normalize text if needed
+                        pdf_content += page_text
+                    except Exception as e:
+                        self.logger.warning(f"Error extracting text from page {page_num}: {e}")
+                        # Continue with what we have so far
 
-            # Limit content size
-            pdf_content = pdf_content[:300000]
+            # Limit content size and handle encoding
+            pdf_content = self._sanitize_text(pdf_content[:50000])
 
             # Clean up the temporary file
             os.unlink(temp_path)
 
             yield {
                 'url': response.url,
-                'title': title,
+                'title': self._sanitize_text(title),
                 'content': pdf_content,
                 'depth': depth,
                 'status': response.status,
