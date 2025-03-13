@@ -174,6 +174,7 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
     The queries should be based on the task description.
     The queries should be short and concise.
     The queries should be designed specifically for web search, especially for search engines like DuckDuckGo, Google, SearXNG and Tavily.
+    The queries can be both English and Chinese.
     Task Description: {description}
     Your current knowledge and requirements: {knowledge}
     """)
@@ -452,7 +453,7 @@ async def execute_task(task: dict, task_results: Dict[str, str]) -> str:
 def generate_report(user_task: str, results: Dict[str, str]) -> str:
     system_message = SystemMessagePromptTemplate.from_template(
         """
-        You are a professional analyst.
+        You are a professional data analyst.
         Your job is to analyze the user's task and the results obtained from the tasks.
         Finally generate a detailed report based on the user's task and the results with your analysis.
         """
@@ -474,6 +475,44 @@ def generate_report(user_task: str, results: Dict[str, str]) -> str:
     chain = prompt | deepseek_reasoner_llm
     print(f"Generating report from results: {results}")
     return chain.invoke({"user_task": user_task, "results": results}).content
+
+
+def generate_file_name(user_task: str, report: str) -> str:
+    system_message = SystemMessagePromptTemplate.from_template(
+        """
+        You are a professional name generator.
+        Your job is to analyze a report and generate a file name based on the report.
+        The format of the file name should be:
+        1. Separate words with underscores '_'.
+        2. Use lowercase letters.
+        3. Short and concise.
+        4. Do not generate the extension, only the file name.
+        5. Do not generate anything else, just the file name.
+        
+        Example:
+        1. "example_report"
+        2. "my_project_summary"
+        3. "data_analysis"
+        4. "report"
+        """
+    )
+    human_message = HumanMessagePromptTemplate.from_template(
+        """
+        User task is as follows:
+        {user_task}
+        Generate a file name based on the following report:
+        {report}
+        """
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        system_message,
+        human_message
+    ])
+
+    chain = prompt | deepseek_llm
+    print(f"Generating file name from report: {report}")
+    return chain.invoke({"user_task": user_task, "report": report}).content
 
 def decomposer_node(state: AgentState) -> dict:
     tasks = decompose_tasks(state["user_input"])
@@ -537,6 +576,20 @@ def report_generator_node(state: AgentState) -> dict:
     report = generate_report(state["user_input"], state["task_results"])
     return {"report": report}
 
+def file_generator_node(state: AgentState):
+    if not state["report"]:
+        return
+
+    file_name = generate_file_name(state["user_input"], state["report"])
+    current_time = time.strftime("%Y%m%d_%H%M%S")
+    file_name = file_name + "_" + current_time + ".md"
+    file_path = os.path.join(os.path.dirname(__file__), "results", file_name)
+    # Write the final report to a file
+    with open(file_path, "w") as f:
+        f.write(result["report"])
+
+    print(f"Report {file_path} generated successfully!")
+
 workflow = StateGraph(AgentState)
 
 # Add nodes
@@ -547,6 +600,7 @@ workflow.add_node("search_result_parser", search_result_parser_node)
 workflow.add_node("task_executor", task_executor_node)
 workflow.add_node("state_updater", state_updater_node)
 workflow.add_node("report_generator", report_generator_node)
+workflow.add_node("file_generator", file_generator_node)
 
 # Define edges
 workflow.set_entry_point("decomposer")
@@ -564,7 +618,8 @@ workflow.add_conditional_edges(
     lambda state: "router" if state["tasks"] else "report_generator",
     {"router": "router", "report_generator": "report_generator"}
 )
-workflow.add_edge("report_generator", END)
+workflow.add_edge("report_generator", "file_generator")
+workflow.add_edge("file_generator", END)
 
 # Compile the agent
 agent = workflow.compile()
@@ -598,11 +653,4 @@ You should provide a detailed report on the side-chain and bridging solutions yo
 
 result = asyncio.run(run_agent(your_task))
 
-current_time = time.strftime("%Y%m%d_%H%M%S")
-file_name = "vsys_side_chain_report_" + current_time + ".md"
-file_path = os.path.join(os.path.dirname(__file__), "results", file_name)
-# Write the final report to a file
-with open(file_path, "w") as f:
-    f.write(result["report"])
-
-print(f"Report {file_path} generated successfully!")
+print(f"Final report: {result['report']}")
