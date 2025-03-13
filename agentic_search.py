@@ -257,7 +257,7 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
                     # Get all links from the duckduckgo_results string, start with 'link: ', end with ',' or at the end of the string
                     new_duckduckgo_results_links = [link.split(",")[0] for link in duckduckgo_results.split("link: ")[1:]]
                     duckduckgo_results_links.extend(new_duckduckgo_results_links)
-                    new_searxng_results_links = [ item["link"] for item in searxng_results if "link" in item ]
+                    new_searxng_results_links = [ item["link"] for item in searxng_results if "link" in item ][0:2]
                     searxng_results_links.extend(new_searxng_results_links)
                     # searxng_content_list.extend([item["snippet"] for item in searxng_results])
 
@@ -441,17 +441,30 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
     for result in search_results:
         search_result += result + "\n"
 
-    prompt = PromptTemplate.from_template(
-    """
-    Current time: {current_time}
-    Extract the main content from the web search results.
-    Do not miss any important information.
-    Merge same or similar information.
-    Remove any irrelevant information.
-    Current task: {task}
-    Web search results: {search_result}
-    """
+    system_message = SystemMessagePromptTemplate.from_template(
+        """
+        You are a professional project analyst.
+        Extract the main content from the web search results.
+        Do not miss any important information.
+        Merge same or similar information.
+        Remove any irrelevant information.
+        List all technical, metric or article details from search results, do not just summarize.
+        """
     )
+    human_message = HumanMessagePromptTemplate.from_template(
+        """
+        Current time: {current_time}
+        
+        Current task: {task}
+        
+        Web search results: {search_result}
+        """
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        system_message,
+        human_message
+    ])
 
     final_search_result = ""
     chain = prompt | deepseek_reasoner_llm
@@ -642,8 +655,10 @@ def file_generator_node(state: AgentState):
     # Check if the file name is valid as a file name
     if not report_file_name.isidentifier():
         print(f"Invalid file name: {report_file_name}")
+        report_file_name = "report"
 
-    report_file_name = "report"
+    print(f"Generated file name prefix: {report_file_name}")
+
     report_reference_file_name = report_file_name + "_reference"
 
     current_time = time.strftime("%Y%m%d_%H%M%S")
@@ -713,82 +728,18 @@ async def run_agent(your_task: str = None):
     return await agent.ainvoke(initial_state, config={"recursion_limit": 100})
 
 your_task = """
-Act as a senior cross-border e-commerce consultant specializing in handmade crafts, create a comprehensive market entry strategy report for a Chinese individual seller targeting **North America & Europe**. Focus on cultural adaptation and practical solutions for small-scale sellers. Structure your analysis as follows:
-
----
-
-### **1. Market Analysis for Western Markets**  
-1.1 **Demand Insights**  
-- Top 3 trending handmade categories in US/Europe (2021-2025) with growth data  
-- Western consumers' premium preferences: Eco-friendly materials vs. price sensitivity analysis  
-- Seasonal demand patterns (holiday peaks, wedding seasons, etc.)  
-
-1.2 **Competition Breakdown**  
-- Key competitors analysis: Chinese sellers vs. local artisans on Etsy/Amazon Handmade  
-- Underserved niches combining Chinese cultural elements with Western aesthetics (e.g., minimalist Zen decor, modernized embroidery accessories)  
-
----
-
-### **2. Product Strategy for Cross-Cultural Appeal**  
-2.1 **Cultural Fusion Design**  
-- How to reinterpret traditional Chinese crafts (e.g., porcelain, silk knotting) for Scandinavian/Boho/Modern Farmhouse styles  
-- Storytelling angles: "Silk Road Heritage meets Modern Design" / "Zero-Waste Chinese Craftsmanship"  
-
-2.2 **Pricing & Packaging**  
-- Price benchmarking: Successful Chinese sellers' pricing on Etsy vs. local competitors  
-- Western-style packaging requirements: Sustainable materials, unboxing experience expectations  
-
----
-
-### **3. Platform Optimization for Chinese Sellers**  
-3.1 **Channel Selection**  
-- Platform comparison: Etsy fees vs. Amazon Handmade vs. Shopify (Chinese seller success rates)  
-- Step-by-step Etsy shop setup guide for China-based individuals (ID verification alternatives)  
-
-3.2 **Shipping Solutions**  
-- Best couriers for China-to-West small parcels: Yanwen vs. CNE vs. DHL eCommerce  
-- Customs cheat sheet: HS codes for handmade items, EU VAT thresholds (2025 update)  
-
-3.3 **Compliance Must-Knows**  
-- Western certifications for Chinese crafts: CE marking for home decor, EN71 for toys  
-- Payment must-haves: PayPal business account setup from China, Stripe alternatives  
-
----
-
-### **4. Culturally-Smart Marketing**  
-4.1 **Content That Converts**  
-- TikTok/Instagram Reels ideas: Craft-making process videos with Western-friendly captions  
-- Pinterest SEO: Keyword combinations for "Chinese modern [product category]"  
-
-4.2 **Cultural Pitfalls**  
-- Taboo color combinations (e.g., red/black in Germany)  
-- Western gift-giving etiquette for packaging cards  
-
-4.3 **Customer Retention**  
-- Email marketing templates for cross-cultural communication  
-- Handling returns: Cost-effective solutions for China-based sellers  
-
----
-
-### **5. Risk Management**  
-5.1 **Red Flags for Chinese Sellers**  
-- Common IP issues: Avoiding Disney/Brand motifs in fan art  
-- Exchange rate hedging tools for USD/EUR transactions  
-
-5.2 **Bootstrapping Plan**  
-- Minimum startup budget breakdown (RMB 5k-20k range)  
-- MVP testing strategy: 3 high-demand low-cost products  
-
----
-
-**Special Add-ons:**  
-- Case studies: 3 Chinese Etsy sellers achieving $10k+/month revenue  
-- Tools: Best AI-powered translation tools for product descriptions  
-- 120-Day Launch Roadmap:  
-  W1-4: Product Selection & Certification  
-  W5-8: Store Setup & Sample Shooting  
-  W9-12: First Campaign & Logistics Test  
-  W13-16: Scale-Up & Review Management
+I'm currently working on a project to build a evm compatible side-chain for VSYS chain.
+Find and compare side-chain and bridging solutions for VSYS chain.
+The side-chain needs to be compatible with EVM and support smart contracts.
+The side-chain can be used for commercial.
+The side-chain needs to run as a private chain, cannot connect to current main/test blockchain network.
+The bridging solution should be secure and efficient.
+VSYS chain do not have any side-chain or bridging solution yet, so current bridging solutions will not work, we have to start from scratch.
+You need to study how VSYS chain works, including consensus, block generation, transaction processing, etc. from online resources.
+You need to study current evm compatible blockchain, including consensus, block generation, transaction processing, etc. which can be used as a side-chain, and can be used for commercial from online resources.
+You need to study how bridging solution works, including cross-chain communication, asset transfer, etc. from online resources.
+My final goal is tweaking VSYS chain and creating a bridge to a currently existing evm compatible blockchain as a side-chain, especially by building a witness (Oracle) node that can communicate with the side-chain, and without touching the funds on both chains, to avoid becoming VASP (Virtual Asset Service Provider).
+You should provide a detailed report on the side-chain and bridging solutions you found, including potential evm compatible blockchains that can be used as a side-chain, and bridging solutions that can be used to connect VSYS chain with the side-chain.
 """
 
 result = asyncio.run(run_agent(your_task))

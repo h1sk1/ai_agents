@@ -128,7 +128,7 @@ class UniversalSpider(scrapy.Spider):
         # Handle HTML content as before
         page = response.meta.get('playwright_page')
         try:
-            content = (await page.evaluate('document.body.innerText'))[:300000] if page else ''
+            content = (await page.evaluate('document.body.innerText'))[1000:45000] if page else ''
             yield {
                 'url': response.url,
                 'title': response.css('title::text').get(),
