@@ -235,7 +235,7 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
                     # Get all links from the duckduckgo_results string, start with 'link: ', end with ',' or at the end of the string
                     new_duckduckgo_results_links = [link.split(",")[0] for link in duckduckgo_results.split("link: ")[1:]]
                     duckduckgo_results_links.extend(new_duckduckgo_results_links)
-                    new_searxng_results_links = [ item["link"] for item in searxng_results if "link" in item ][0:1]
+                    new_searxng_results_links = [ item["link"] for item in searxng_results if "link" in item ]
                     searxng_results_links.extend(new_searxng_results_links)
                     # searxng_content_list.extend([item["snippet"] for item in searxng_results])
 
@@ -319,52 +319,52 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
     # Divide the search links into batches of 5
     search_links_batches = [search_links[i:i + 5] for i in range(0, len(search_links), 5)]
 
+    # Create a semaphore to limit concurrency
+    max_concurrent_processes = 5  # Change this number to your desired limit
+    semaphore = asyncio.Semaphore(max_concurrent_processes)
+
     async def run_scrapy_with_file_monitor(scrapy_dir, search_links, spider_result_file_path, timeout=120):
-        random.seed(time.time())
-        random_num = random.randint(1, 10)
-        await asyncio.sleep(random_num)
-        # Start the scrapy process using asyncio subprocess
-        process = await asyncio.create_subprocess_exec(
-            "scrapy", "crawl", "universal_spider",
-            "-a", f"urls={','.join(search_links)}",
-            "-a", f"output_path={spider_result_file_path}",
-            cwd=scrapy_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
+        # Acquire semaphore before running the process
+        async with semaphore:
+            random.seed(time.time())
+            random_num = random.randint(1, 10)
+            await asyncio.sleep(random_num)
 
-        # Monitor the process non-blockingly
-        try:
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-            return_code = process.returncode
+            # Start the scrapy process using asyncio subprocess
+            process = await asyncio.create_subprocess_exec(
+                "scrapy", "crawl", "universal_spider",
+                "-a", f"urls={','.join(search_links)}",
+                "-a", f"output_path={spider_result_file_path}",
+                cwd=scrapy_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
 
-            # Print output and error
-            # if stdout:
-            #     print(f"Scrapy stdout: {stdout.decode()}")
-            # if stderr:
-            #     print(f"Scrapy stderr: {stderr.decode()}")
-
-            if return_code != 0 and not os.path.exists(spider_result_file_path):
-                raise Exception(f"Failed to run scrapy: {stderr.decode()}")
-            else:
-                print(f"Scrapy spider completed, output file: {spider_result_file_path}")
-
-        except asyncio.TimeoutError:
-            print(f"Scrapy process timed out after {timeout} seconds, terminating...")
-            process.terminate()
             try:
-                # Short timeout for the wait call
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                print(f"Process kill wait timed out, continuing anyway...")
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                return_code = process.returncode
 
-    # Use asyncio to run multiple scrapy processes concurrently
+                if return_code != 0 and not os.path.exists(spider_result_file_path):
+                    raise Exception(f"Failed to run scrapy: {stderr.decode()}")
+                else:
+                    print(f"Scrapy spider completed, output file: {spider_result_file_path}")
+
+            except asyncio.TimeoutError:
+                print(f"Scrapy process timed out after {timeout} seconds, terminating...")
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    print(f"Process kill wait timed out, continuing anyway...")
+
+    # Use asyncio to run multiple scrapy processes with limited concurrency
     tasks = []
     for index, search_links_batch in enumerate(search_links_batches):
         result_file_name = f"search_results_{current_time}_{index}.jsonl"
         result_file_path = os.path.join(scrapy_dir, "results", result_file_name)
         tasks.append(run_scrapy_with_file_monitor(scrapy_dir, search_links_batch, result_file_path))
 
+    # This will still create all tasks but the semaphore ensures only N run at once
     await asyncio.gather(*tasks)
 
     print(f"Scrapy processes completed, parsing search results...")
@@ -374,6 +374,10 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
     for index, search_links_batch in enumerate(search_links_batches):
         result_file_name = f"search_results_{current_time}_{index}.jsonl"
         result_file_path = os.path.join(scrapy_dir, "results", result_file_name)
+        # Check if the result file exists
+        if not os.path.exists(result_file_path):
+            print(f"Result file not found: {result_file_path}")
+            continue
         # Read results from the jsonl file
         with open(result_file_path, "r") as f:
             data = f.readlines()
