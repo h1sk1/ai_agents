@@ -72,8 +72,9 @@ class AgentState(TypedDict):
     tasks: List[dict]
     task_results: Dict[str, str]
     current_task: Optional[dict]
-    needs_tool: Optional[str]  # "True" or "False"
+    needs_tool: Optional[bool]  # True or False
     task_result: Optional[str]  # Temporary result of current task
+    task_completed: Optional[bool]  # True or False
     search_links: Optional[List[str]]  # Search links
     report: Optional[str]      # Final report
 
@@ -81,6 +82,7 @@ def decompose_tasks(user_input: str) -> (str, List[dict]):
     system_message = SystemMessagePromptTemplate.from_template("""
     You are a professional task analyst.
     Your job is to analyze user input and give a summary of the task. And decompose the user's input into a list of sequential tasks.
+    You need to study every detail of the user's input and decompose it into multiple tasks, so please be as detailed as possible.
     The format of your summary should be a JSON array, the details are as follows:
     1. The first object in the array should be the summary of the user's input. The object should only have a single key 'summary' with the value as the summary of the user's input.
         a. The attribute should be named 'summary'.
@@ -137,7 +139,7 @@ def decompose_tasks(user_input: str) -> (str, List[dict]):
 
     return user_task_summary, tasks
 
-async def route_task(task: dict) -> str:
+async def route_task(task: dict) -> bool:
     # current_time = time.strftime("%Y%m%d_%H%M%S")
     # prompt = PromptTemplate.from_template(
     # """
@@ -176,42 +178,60 @@ async def route_task(task: dict) -> str:
 
     response = task["may_needs_tool"]
 
-    need_tool = ""
     if response.find("True") != -1:
-        need_tool = "True"
+        need_tool = True
     elif response.find("False") != -1:
-        need_tool = "False"
-    if need_tool not in ["True", "False"]:
+        need_tool = False
+    else:
         raise ValueError(f"Invalid response: {response}")
 
     needs_external_tool = "[x]"
-    if response == "True":
+    if need_tool:
         needs_external_tool = "[✔]"
     print(f"Task: {task['name']} needs external tools {needs_external_tool}")
 
-    return response
+    return need_tool
 
-async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], str):
+async def web_search(task: dict, task_result: str) -> (List[str], str):
     print(f"Searching the web for: {task['description']}")
 
     current_time = time.strftime("%Y%m%d_%H%M%S")
-    # Decompose the task description into multiple search engine queries
-    prompt = PromptTemplate.from_template(
+    system_message = SystemMessagePromptTemplate.from_template(
     """
-    Current time: {current_time}
-    Decompose the following task description into multiple search engine queries. Only return the queries as a comma-separated string.
+    You are a professional search engine expert.
+    You need to study every detail of the task with the help of web search.
+    Decompose the following task description into multiple search engine queries, based on the task description and your current knowledge.
+    Only try to find things that you don't already know and cannot understand from your current knowledge.
+    Only return the queries as a comma-separated string.
     The queries should be separated by a comma, do not add any serial numbers or newline characters, just the queries separated by commas.
     The queries should be based on the task description.
     The queries should be short and concise.
     The queries should be designed specifically for web search, especially for search engines like DuckDuckGo, Google, SearXNG and Tavily.
-    The queries can be both English and Chinese.
-    Task Description: {description}
-    Your current knowledge and requirements: {knowledge}
+    The queries should first consider to be in English.
+    The queries can also be in Chinese if the task description contains queries asking for Chinese information.
+    The queries should be less than 10 words each, so you need to be concise, super specific and super precise.
+    The queries should not be more than 10 queries, so you should contain all the information you want to search in 10 queries.
     """
     )
 
+    human_message = HumanMessagePromptTemplate.from_template(
+    """
+    Current time: {current_time}
+    Task Description:
+    {description}
+    Your current knowledge:
+    {knowledge}
+    """
+    )
+
+    # Decompose the task description into multiple search engine queries
+    prompt = ChatPromptTemplate.from_messages([
+        system_message,
+        human_message
+    ])
+
     chain = prompt | deepseek_reasoner_llm
-    response = chain.invoke({"current_time": current_time, "description": task["description"], "knowledge": task_results}).content
+    response = chain.invoke({"current_time": current_time, "description": task["description"], "knowledge": task_result}).content
 
     queries = response.strip().split(",")
 
@@ -257,13 +277,14 @@ async def web_search(task: dict, task_results: Dict[str, str]) -> (List[str], st
                     # Get all links from the duckduckgo_results string, start with 'link: ', end with ',' or at the end of the string
                     new_duckduckgo_results_links = [link.split(",")[0] for link in duckduckgo_results.split("link: ")[1:]]
                     duckduckgo_results_links.extend(new_duckduckgo_results_links)
-                    new_searxng_results_links = [ item["link"] for item in searxng_results if "link" in item ][0:2]
+                    new_searxng_results_links = [ item["link"] for item in searxng_results if "link" in item ][0:3]
                     searxng_results_links.extend(new_searxng_results_links)
                     # searxng_content_list.extend([item["snippet"] for item in searxng_results])
 
                     # new_tavily_contents = "\n".join(new_tavily_results)
                     #
                     # tavily_content_list.append(new_tavily_contents)
+                    break
                 except Exception as e:
                     print(f"Error in gathering search results: {traceback.format_exc()}")
 
@@ -389,7 +410,7 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
     # This will still create all tasks but the semaphore ensures only N run at once
     await asyncio.gather(*tasks)
 
-    print(f"Scrapy processes completed, parsing search results...")
+    print(f"Scrapy processes completed, parsing search results...\n")
 
     content = []
 
@@ -484,27 +505,50 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
             time.sleep(30)
             continue
 
-    print(f"Search result: {final_search_result}")
+    # print(f"Search result: {final_search_result}")
     return final_search_result
 
-async def execute_task(task: dict, task_results: Dict[str, str]) -> str:
+async def execute_task(task: dict, task_results: Dict[str, str], task_result: str) -> str:
     current_time = time.strftime("%Y%m%d_%H%M%S")
-    prompt = PromptTemplate.from_template(
+
+    system_message = SystemMessagePromptTemplate.from_template(
     """
-    Current time: {current_time}
-    Complete task: {description}
-    Your current knowledge: {knowledge}
+    You are a professional project analyst.
+    Your job is to analyze the user's task and the results obtained from external tools like web search.
+    And give a detailed analysis based on the user's task and the results obtained with your previous analysis.
+    Do not miss any important information and be as detailed as possible.
     """
     )
-    chain = prompt | deepseek_llm
-    print(f"Executing task: {task}, with current knowledge: {task_results}")
+
+    human_message = HumanMessagePromptTemplate.from_template(
+    """
+    Current time: {current_time}
+    Current task: 
+    {description}
+    
+    Previous analysis:
+    {analysis}
+    
+    All Tasks results:
+    {knowledge}
+    """
+    )
+    
+    prompt = ChatPromptTemplate.from_messages([
+        system_message,
+        human_message
+    ])
+
+    chain = prompt | deepseek_reasoner_llm
+    print(f"Executing task: {task}, with current knowledge: {task_results}\n")
     for i in range(3):
         if i == 2:
             current_chain = prompt | deepseek_reasoner_llm
         else:
             current_chain = chain
         try:
-            response = await asyncio.wait_for(current_chain.ainvoke({"current_time": current_time, "description": task["description"], "knowledge": task_results}), timeout=300)
+            response = await asyncio.wait_for(current_chain.ainvoke({"current_time": current_time, "description": task["description"], "analysis": task_result, "knowledge": task_results}), timeout=300)
+            break
         except Exception as e:
             print(f"Error in executing task: {traceback.format_exc()}")
 
@@ -512,27 +556,102 @@ async def execute_task(task: dict, task_results: Dict[str, str]) -> str:
                 raise asyncio.TimeoutError("Timeout error")
             time.sleep(30)
             continue
-        return response.content
+    return response.content
+
+async def self_reflection(full_task_summary: str, task_name: str, task_description: str, task_result: str) -> bool:
+    current_time = time.strftime("%Y%m%d_%H%M%S")
+    system_message = SystemMessagePromptTemplate.from_template(
+    """
+    You are a professional project analyst.
+    Your job is to reflect on the full task summary and the current task with it result obtained from external tools like web search.
+    Finally give a result whether you have gather enough information and already able to answer everything in the current task which is enough to complete the full task.
+    Important: You have to be honest and have figured out every detail of the task with current knowledge before you can answer 'True'.
+    The result should be whether the task is completed or not with a simple 'True' or 'False'.
+    """
+    )
+
+    human_message = HumanMessagePromptTemplate.from_template(
+    """
+    Current time: {current_time}
+    
+    Full Task summary:
+    {full_task_summary}
+    
+    Current task description:
+    {task_description}
+    
+    Current task results:
+    {task_result}
+    """
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        system_message,
+        human_message
+    ])
+
+    chain = prompt | deepseek_reasoner_llm
+
+    print(f"Self reflection on task: {task_name}")
+
+    for i in range(3):
+        if i == 2:
+            current_chain = prompt | volcengine_deepseek_llm
+        else:
+            current_chain = chain
+        try:
+            response = await asyncio.wait_for(
+                current_chain.ainvoke({
+                    "full_task_summary": full_task_summary,
+                    "current_time": current_time,
+                    "task_description": task_description,
+                    "task_result": task_result
+                }),
+                timeout=300,
+            )
+            response = response.content.strip().lower().capitalize()
+            break
+        except Exception as e:
+            print(f"Error in self reflection: {traceback.format_exc()}")
+
+            if i == 2:
+                raise asyncio.TimeoutError("Timeout error")
+            time.sleep(30)
+            continue
+
+    if response.find("True") != -1:
+        completed = True
+    elif response.find("False") != -1:
+        completed = False
+    else:
+        raise ValueError(f"Invalid response: {response}")
+
+    completed_mark = "[x]"
+    if completed:
+        completed_mark = "[✔]"
+    print(f"Task: {task_name} is completed: {completed_mark}\n")
+
+    return completed
 
 def generate_report(user_task: str, results: Dict[str, str]) -> str:
     current_time = time.strftime("%Y%m%d_%H%M%S")
     system_message = SystemMessagePromptTemplate.from_template(
-        """
-        You are a professional project analyst.
-        Your job is to analyze the user's task and the results obtained from external tools like web search.
-        Finally generate a detailed report based on the user's task and the results with your analysis.
-        Please do not miss any important information and be as detailed as possible.
-        """
+    """
+    You are a professional project analyst.
+    Your job is to analyze the user's task and the results obtained from external tools like web search.
+    Finally generate a detailed report based on the user's task and the results with your analysis.
+    Please do not miss any important information and be as detailed as possible.
+    """
     )
     human_message = HumanMessagePromptTemplate.from_template(
-        """
-        Current time: {current_time}
-        User original task summary is as follows:
-        {user_task}
-        
-        User decomposed tasks and their results which were obtained from external tools like web search or analyzed by analysts:
-        {results}
-        """
+    """
+    Current time: {current_time}
+    User original task summary is as follows:
+    {user_task}
+    
+    User decomposed tasks and their results which were obtained from external tools like web search or analyzed by analysts:
+    {results}
+    """
     )
 
     prompt = ChatPromptTemplate.from_messages([
@@ -579,7 +698,7 @@ def generate_file_name(user_task: str, report: str) -> str:
     ])
 
     chain = prompt | deepseek_llm
-    print(f"Generating file name from report: {report}")
+    print(f"Generating file name...")
     return chain.invoke({"user_task": user_task, "report": report}).content
 
 def decomposer_node(state: AgentState) -> dict:
@@ -600,8 +719,8 @@ async def router_node(state: AgentState) -> dict:
 async def search_agent_node(state: AgentState) -> dict:
     if not state["current_task"]:
         return {}
-    search_links, tavily_content = await web_search(state["current_task"], state["task_results"])
-    return {"search_links": search_links, "task_result": tavily_content}
+    search_links, search_content = await web_search(state["current_task"], state["task_result"])
+    return {"search_links": search_links, "task_result": state["task_result"] + "\n" + search_content}
 
 async def search_result_parser_node(state: AgentState) -> dict:
     if not state["search_links"] or not state["current_task"]:
@@ -612,8 +731,24 @@ async def search_result_parser_node(state: AgentState) -> dict:
 async def task_executor_node(state: AgentState) -> dict:
     if not state["current_task"]:
         return {}
-    result = await execute_task(state["current_task"], state["task_results"])
-    return {"task_result": result}
+    result = await execute_task(state["current_task"], state["task_results"], state["task_result"])
+    return {"task_result": state["task_result"] + "\n" + result}
+
+async def self_reflection_node(state: AgentState) -> dict:
+    if not state["task_result"]:
+        return {"task_completed": False}
+
+    if not state["current_task"]:
+        return {"task_completed": True}
+
+    task_completed = await self_reflection(
+        state["user_task_summary"],
+        state["current_task"]["name"],
+        state["current_task"]["description"],
+        state["task_result"]
+    )
+
+    return {"task_completed": task_completed}
 
 def state_updater_node(state: AgentState) -> dict:
     remaining_tasks = state["tasks"][1:] if state["tasks"] else []
@@ -635,7 +770,9 @@ def state_updater_node(state: AgentState) -> dict:
         "task_results": new_results,
         "tasks": remaining_tasks,
         "current_task": next_task,
-        "task_result": None,  # Clear temporary result
+        "needs_tool": None,  # Clear needs_tool status
+        "task_result": "",  # Clear temporary result
+        "task_completed": None,  # Clear task completion status
         "search_links": None  # Clear search links
     }
 
@@ -643,7 +780,6 @@ def report_generator_node(state: AgentState) -> dict:
     if not state["task_results"]:
         return {"report": "No results to report."}
     report = generate_report(state["user_task_summary"], state["task_results"])
-    print(f"Generated report: {report}")
     return {"report": report}
 
 def file_generator_node(state: AgentState):
@@ -675,8 +811,8 @@ def file_generator_node(state: AgentState):
         # Write the task_results to the reference file
         f.write("Task Results:\n")
         for task, result in state["task_results"].items():
-            f.write(f"Task: {task}\n")
-            f.write(f"Result: {result}\n\n")
+            f.write(f"# Task: {task}\n")
+            f.write(f"## Result:\n{result}\n\n")
 
     print(f"Report {report_file_name} generated successfully!")
 
@@ -688,6 +824,7 @@ workflow.add_node("router", router_node)
 workflow.add_node("search_agent", search_agent_node)
 workflow.add_node("search_result_parser", search_result_parser_node)
 workflow.add_node("task_executor", task_executor_node)
+workflow.add_node("self_reflection", self_reflection_node)
 workflow.add_node("state_updater", state_updater_node)
 workflow.add_node("report_generator", report_generator_node)
 workflow.add_node("file_generator", file_generator_node)
@@ -697,12 +834,17 @@ workflow.set_entry_point("decomposer")
 workflow.add_edge("decomposer", "router")
 workflow.add_conditional_edges(
     "router",
-    lambda state: "search_agent" if state["needs_tool"] == "True" else "task_executor",
+    lambda state: "search_agent" if state["needs_tool"] else "task_executor",
     {"search_agent": "search_agent", "task_executor": "task_executor"}
 )
 workflow.add_edge("search_agent", "search_result_parser")
-workflow.add_edge("search_result_parser", "state_updater")
-workflow.add_edge("task_executor", "state_updater")
+workflow.add_edge("search_result_parser", "self_reflection")
+workflow.add_edge("task_executor", "self_reflection")
+workflow.add_conditional_edges(
+    "self_reflection",
+    lambda state: "state_updater" if state["task_completed"] else "router",
+    {"state_updater": "state_updater", "router": "router"}
+)
 workflow.add_conditional_edges(
     "state_updater",
     lambda state: "router" if state["tasks"] else "report_generator",
@@ -722,24 +864,25 @@ async def run_agent(your_task: str = None):
         "task_results": {},
         "current_task": None,
         "needs_tool": None,
-        "task_result": None,
-        "report": None
+        "task_completed": None,
+        "task_result": "",
+        "report": ""
     }
     return await agent.ainvoke(initial_state, config={"recursion_limit": 100})
 
 your_task = """
-I'm currently working on a project to build a evm compatible side-chain for VSYS chain.
+I'm currently working on a project to build any side-chain for VSYS chain.
 Find and compare side-chain and bridging solutions for VSYS chain.
-The side-chain needs to be compatible with EVM and support smart contracts.
+The side-chain needs to support smart contracts.
 The side-chain can be used for commercial.
-The side-chain needs to run as a private chain, cannot connect to current main/test blockchain network.
-The bridging solution should be secure and efficient.
+The side-chain can be ran as a private chain, without connecting to current main/test blockchain network.
+The bridging solution should be secure and efficient, and without touching the funds on both chains, to avoid becoming VASP (Virtual Asset Service Provider)
 VSYS chain do not have any side-chain or bridging solution yet, so current bridging solutions will not work, we have to start from scratch.
 You need to study how VSYS chain works, including consensus, block generation, transaction processing, etc. from online resources.
-You need to study current evm compatible blockchain, including consensus, block generation, transaction processing, etc. which can be used as a side-chain, and can be used for commercial from online resources.
+You need to study current blockchain with smart contract support, including consensus, block generation, transaction processing, etc. which can be used as a side-chain, and can be used for commercial from online resources.
 You need to study how bridging solution works, including cross-chain communication, asset transfer, etc. from online resources.
-My final goal is tweaking VSYS chain and creating a bridge to a currently existing evm compatible blockchain as a side-chain, especially by building a witness (Oracle) node that can communicate with the side-chain, and without touching the funds on both chains, to avoid becoming VASP (Virtual Asset Service Provider).
-You should provide a detailed report on the side-chain and bridging solutions you found, including potential evm compatible blockchains that can be used as a side-chain, and bridging solutions that can be used to connect VSYS chain with the side-chain.
+My final goal is tweaking VSYS chain and creating a bridge to a currently existing blockchain as a side-chain, especially by building a witness (Oracle) node that can communicate with the side-chain, and without touching the funds on both chains, to avoid becoming VASP (Virtual Asset Service Provider).
+You should provide a detailed report on the side-chain and bridging solutions you found, including potential sblockchains that can be used as a side-chain, and bridging solutions that can be used to connect VSYS chain with the side-chain.
 """
 
 result = asyncio.run(run_agent(your_task))
