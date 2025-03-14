@@ -809,10 +809,9 @@ def file_generator_node(state: AgentState):
     # Write the report reference to a file
     with open(report_reference_file_name, "w") as f:
         # Write the task_results to the reference file
-        f.write("Task Results:\n")
         for task, result in state["task_results"].items():
-            f.write(f"# Task: {task}\n")
-            f.write(f"## Result:\n{result}\n\n")
+            f.write(f"# Task {task}\n")
+            f.write(f"## Analysis\n{result}\n\n")
 
     print(f"Report {report_file_name} generated successfully!")
 
