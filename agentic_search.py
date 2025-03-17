@@ -40,22 +40,29 @@ deepseek_llm = ChatDeepSeek(
     temperature=0,
 )
 
-# deepseek_reasoner_llm = ChatDeepSeek(
-#     model_name=os.environ.get("DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"),
-#     api_base=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
-#     api_key=os.environ.get("DEEPSEEK_API_KEY", "your-api-key"),
-#     temperature=0,
-# )
-
 deepseek_reasoner_llm = ChatDeepSeek(
-    model_name=os.environ.get("VOL_DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"),
-    api_base=os.environ.get("VOL_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
-    api_key=os.environ.get("VOL_DEEPSEEK_API_KEY", "your-api-key"),
+    model_name=os.environ.get("DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"),
+    api_base=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+    api_key=os.environ.get("DEEPSEEK_API_KEY", "your-api-key"),
     temperature=0,
 )
 
+# deepseek_reasoner_llm = ChatDeepSeek(
+#     model_name=os.environ.get("VOL_DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"),
+#     api_base=os.environ.get("VOL_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+#     api_key=os.environ.get("VOL_DEEPSEEK_API_KEY", "your-api-key"),
+#     temperature=0,
+# )
+
 volcengine_deepseek_llm = ChatOpenAI(
     model_name=os.environ.get("VOL_DEEPSEEK_V3_MODEL", "deepseek-chat"),
+    openai_api_base=os.environ.get("VOL_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
+    openai_api_key=os.environ.get("VOL_DEEPSEEK_API_KEY", "your-api-key"),
+    temperature=0,
+)
+
+volcengine_deepseek_reasoner_llm = ChatOpenAI(
+    model_name=os.environ.get("VOL_DEEPSEEK_REASONER_MODEL", "deepseek-reasoner"),
     openai_api_base=os.environ.get("VOL_DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
     openai_api_key=os.environ.get("VOL_DEEPSEEK_API_KEY", "your-api-key"),
     temperature=0,
@@ -75,6 +82,7 @@ class AgentState(TypedDict):
     needs_tool: Optional[bool]  # True or False
     task_result: Optional[str]  # Temporary result of current task
     task_completed: Optional[bool]  # True or False
+    task_retry_count: Optional[int] # Number of retries for current task
     search_links: Optional[List[str]]  # Search links
     report: Optional[str]      # Final report
 
@@ -230,7 +238,7 @@ async def web_search(task: dict, task_result: str) -> (List[str], str):
         human_message
     ])
 
-    chain = prompt | deepseek_reasoner_llm
+    chain = prompt | volcengine_deepseek_reasoner_llm
     response = chain.invoke({"current_time": current_time, "description": task["description"], "knowledge": task_result}).content
 
     queries = response.strip().split(",")
@@ -254,7 +262,6 @@ async def web_search(task: dict, task_result: str) -> (List[str], str):
         # search_engine_list.extend(["wikipedia", "wikidata"])
         search_engine_list = ["bing", "google", "yahoo", "wikipedia", "wikidata"]
         return await searchXNG.aresults(query, num_results=3, engines=search_engine_list)
-        return ""
 
     tasks = []
     tavily_content_list = []
@@ -488,7 +495,7 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
     ])
 
     final_search_result = ""
-    chain = prompt | deepseek_reasoner_llm
+    chain = prompt | volcengine_deepseek_reasoner_llm
     for i in range(3):
         if i == 2:
             current_chain = prompt | volcengine_deepseek_llm
@@ -539,11 +546,11 @@ async def execute_task(task: dict, task_results: Dict[str, str], task_result: st
         human_message
     ])
 
-    chain = prompt | deepseek_reasoner_llm
+    chain = prompt | volcengine_deepseek_reasoner_llm
     print(f"Executing task: {task}, with current knowledge: {task_results}\n")
     for i in range(3):
         if i == 2:
-            current_chain = prompt | deepseek_reasoner_llm
+            current_chain = prompt | volcengine_deepseek_reasoner_llm
         else:
             current_chain = chain
         try:
@@ -624,7 +631,7 @@ async def self_reflection(full_task_summary: str, task_name: str, task_descripti
     elif response.find("False") != -1:
         completed = False
     else:
-        raise ValueError(f"Invalid response: {response}")
+        completed = False
 
     completed_mark = "[x]"
     if completed:
@@ -741,6 +748,10 @@ async def self_reflection_node(state: AgentState) -> dict:
     if not state["current_task"]:
         return {"task_completed": True}
 
+    if state["task_retry_count"] >= 3:
+        print(f"Task retry count exceeded, task: {state['current_task']}, continue anyway.")
+        return {"task_completed": True}
+
     task_completed = await self_reflection(
         state["user_task_summary"],
         state["current_task"]["name"],
@@ -748,7 +759,10 @@ async def self_reflection_node(state: AgentState) -> dict:
         state["task_result"]
     )
 
-    return {"task_completed": task_completed}
+    return {
+        "task_completed": task_completed,
+        "task_retry_count": state["task_retry_count"] + 1,
+    }
 
 def state_updater_node(state: AgentState) -> dict:
     remaining_tasks = state["tasks"][1:] if state["tasks"] else []
@@ -773,6 +787,7 @@ def state_updater_node(state: AgentState) -> dict:
         "needs_tool": None,  # Clear needs_tool status
         "task_result": "",  # Clear temporary result
         "task_completed": None,  # Clear task completion status
+        "task_retry_count": 0,  # Reset retry count
         "search_links": None  # Clear search links
     }
 
@@ -864,14 +879,15 @@ async def run_agent(your_task: str = None):
         "current_task": None,
         "needs_tool": None,
         "task_completed": None,
+        "task_retry_count": 0,
         "task_result": "",
         "report": ""
     }
     return await agent.ainvoke(initial_state, config={"recursion_limit": 100})
 
 your_task = """
-I'm currently working on a project to build any side-chain for VSYS chain.
-Find and compare side-chain and bridging solutions for VSYS chain.
+I'm currently working on a project to build a side-chain for VSYS chain and communicate them through a bridging solution.
+Find and compare side-chain and bridging solutions for VSYS chain, the bridge solution should be generic and can be used for bridging VSYS chain with any other blockchain with smart contract support.
 The side-chain needs to support smart contracts.
 The side-chain can be used for commercial.
 The side-chain can be ran as a private chain, without connecting to current main/test blockchain network.
