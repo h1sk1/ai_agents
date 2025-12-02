@@ -5,7 +5,7 @@ This project is a collection of AI agents created for demonstrations.
 [Workflows](docs/agentic_search_agent_workflow.md)
 
 ## Gomoku AI Multi-Agent Workflow
-[Workflows](docs/multi_agent_workflow)
+[Workflows](docs/multi_agent_workflow.md)
 
 ## Dependencies
 - Python 3.12
