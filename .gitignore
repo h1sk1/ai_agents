@@ -61,3 +61,9 @@ results/
 webcrawler/results/
 
 __pycache__/
+
+records/
+
+tts_data/
+
+advices/

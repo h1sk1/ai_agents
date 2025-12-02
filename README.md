@@ -1,5 +1,5 @@
 # AI Agent
-This project is a collection of AI agents created by myself
+This project is a collection of AI agents created for demonstrations.
 
 ## Agentic Search AI Agent Workflow
 [Workflows](docs/agentic_search_agent_workflow.md)

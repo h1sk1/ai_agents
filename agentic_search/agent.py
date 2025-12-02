@@ -85,6 +85,7 @@ class AgentState(TypedDict):
     task_retry_count: Optional[int] # Number of retries for current task
     search_links: Optional[List[str]]  # Search links
     report: Optional[str]      # Final report
+    task_id: str
 
 def decompose_tasks(user_input: str) -> (str, List[dict]):
     system_message = SystemMessagePromptTemplate.from_template("""
@@ -356,15 +357,7 @@ async def parse_search_links(search_links: List[str], task_description: str, cur
 
     # Call scrapy from command line to get the search results
     current_time = time.strftime("%Y%m%d_%H%M%S")
-    scrapy_dir = os.path.join(os.path.dirname(__file__), "webcrawler")
-
-    # Divide the search links into batches of 5
-    search_links_batches = [search_links[i:i + 5] for i in range(0, len(search_links), 5)]
-
-
-    # Call scrapy from command line to get the search results
-    current_time = time.strftime("%Y%m%d_%H%M%S")
-    scrapy_dir = os.path.join(os.path.dirname(__file__), "webcrawler")
+    scrapy_dir = os.path.join(os.path.dirname(__file__), "..", "webcrawler")
 
     # Divide the search links into batches of 5
     search_links_batches = [search_links[i:i + 5] for i in range(0, len(search_links), 5)]
